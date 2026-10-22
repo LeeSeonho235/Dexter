@@ -36,6 +36,32 @@ button {
   flex-wrap: wrap;
   gap: 16px;
   align-items: flex-start;
+  margin-bottom: 16px;
+}
+
+/* 서버가 보낸 시뮬레이션 화면 (640x480 JPEG) */
+.sim-view {
+  position: relative;
+  width: 640px;
+  max-width: 100%;
+  aspect-ratio: 4 / 3;
+  background: #000;
+}
+
+.sim-view img,
+.sim-view .placeholder {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.phase-open {
+  color: #1a9c3c;
+}
+
+.phase-closed {
+  color: #d03030;
 }
 
 .hand-view {
