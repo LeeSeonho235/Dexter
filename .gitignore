@@ -1,0 +1,12 @@
+.env
+.venv/
+node_modules/
+__pycache__/
+*.pyc
+tmp/
+outputs/
+*.mp4
+*.webm
+third_party/mujoco_menagerie/
+data/
+checkpoints/
