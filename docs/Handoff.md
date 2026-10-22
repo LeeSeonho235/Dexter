@@ -1,7 +1,7 @@
 # Handoff — 현재 상태와 규칙의 원본
 
 > 이 파일은 **나만 수정한다.** 다른 문서와 내용이 다르면 이 파일이 맞다.
-> 마지막 수정: 2026-10-22 (1-1 완료)
+> 마지막 수정: 2026-10-22 (1단계 완료)
 
 ## 한 줄
 
@@ -23,9 +23,9 @@
 ## 지금 상태
 
 - [x] 기획, 스토리, 기존 프로젝트 조사
-- [ ] 1단계: MuJoCo에 SO-101 띄우기(화면 없이 렌더링), 브라우저 손 추적
+- [x] 1단계: MuJoCo에 SO-101 띄우기(화면 없이 렌더링), 브라우저 손 추적
   - [x] 1-1 장면: sim/scene.xml (블록 3cm, 목표, top 카메라, home 자세)
-  - [ ] 1-2 브라우저 손 추적
+  - [x] 1-2 브라우저 손 추적: web/ (MediaPipe 1.1.1, GPU 약 60FPS)
 - [ ] 2단계: 손 → 로봇 연결
 - [ ] 3단계: 시연 녹화, 1차 학습
 - [ ] 4단계: 교정 모드, 2차 학습
@@ -55,3 +55,15 @@ server/.venv/bin/python -m pytest server/tests -q
 ```
 
 메모: shoulder_pan 값이 +이면 로봇이 오른쪽(-y, top 화면 오른쪽)으로 돈다.
+
+```bash
+cd ~/handover/web
+npm test
+npm run dev -- --host 127.0.0.1 --port 3007 --strictPort   # Ports에서 3007 Private 전달 → localhost:3007
+```
+
+메모 (1-2 측정):
+- pinch_ratio = pinch / hand_scale. 폄 0.8~1.0, 붙임 0.1~0.2, 주먹 0.2 (거리 상관없이 비슷). 그리퍼 기준 후보: 0.3 아래 닫힘, 0.5 위 열림
+- wrist의 z는 항상 0 (MediaPipe 기준점). 앞뒤 거리는 hand_scale로 추정 (가까이 0.19, 멀리 0.07)
+- MediaPipe가 통계를 외부로 보내는 코드가 있어 index.html의 CSP(connect-src 'self')로 막음. 서버 WebSocket 붙일 때 그 주소를 connect-src에 추가해야 함
+- 내 포트: 3007 (web). 서버용 포트는 확인 필요

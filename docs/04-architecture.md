@@ -51,6 +51,7 @@ handover/
   "index_tip": [0.55, 0.48, -0.05],
   "thumb_tip": [0.50, 0.50, -0.04],
   "pinch": 0.04,
+  "pinch_ratio": 0.21,
   "palm_open": false,
   "hand_scale": 0.18
 }
