@@ -2,6 +2,7 @@
 
 > 이 파일은 **나만 수정한다.** 다른 문서와 내용이 다르면 이 파일이 맞다.
 > 마지막 수정: 2026-10-22 (기획 완료)
+> 마지막 수정: 2026-10-22 (1-1 완료)
 
 ## 한 줄
 
@@ -23,7 +24,7 @@
 ## 지금 상태
 
 - [x] 기획, 스토리, 기존 프로젝트 조사
-- [ ] 1단계: MuJoCo에 SO-101 띄우기(화면 없이 렌더링), 브라우저 손 추적
+- [x] 1-1 장면: sim/scene.xml (블록 3cm, 목표, top 카메라, home 자세)
 - [ ] 2단계: 손 → 로봇 연결
 - [ ] 3단계: 시연 녹화, 1차 학습
 - [ ] 4단계: 교정 모드, 2차 학습
@@ -31,7 +32,7 @@
 
 ## 확인이 필요한 것 (시작 전)
 
-- [ ] dev-server-01에 GPU가 있는가 (`nvidia-smi`). 없으면 렌더링은 osmesa, 학습은 외부 GPU(Colab 등)
+- [x] GPU 없음. 렌더링은 MUJOCO_GL=egl(Mesa, CPU)로 됨. osmesa는 없음. Renderer는 끝날 때 close()를 직접 불러야 에러가 안 남. 학습은 외부 GPU(Colab 등)
 - [ ] "webcam correction imitation learning", "HG-DAgger hand tracking" 관련 논문이 있는지 검색 → 있으면 02-related-work.md에 추가
 - [ ] LeRobot 현재 버전에서 ACT 학습 명령과 데이터셋 형식 확인 (버전마다 바뀜)
 
@@ -46,4 +47,10 @@
 
 ## 실행 방법
 
-아직 없음. 1단계 끝나면 여기에 적는다.
+```bash
+cd ~/handover
+MUJOCO_GL=egl server/.venv/bin/python sim/render_check.py   # 이미지 → /tmp
+server/.venv/bin/python -m pytest server/tests -q
+```
+
+메모: shoulder_pan 값이 +이면 로봇이 오른쪽(-y, top 화면 오른쪽)으로 돈다.
