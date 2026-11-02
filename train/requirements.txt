@@ -1,0 +1,11 @@
+# 이 서버(GPU 없음)용 CPU 환경. 설치:
+#   python3 -m venv train/.venv
+#   train/.venv/bin/pip install -r train/requirements.txt
+# Colab(GPU)에서는 이 파일 대신 docs/07-lerobot-notes.md의 Colab 절을 따른다(torch는 Colab 기본 CUDA 빌드를 그대로 쓴다).
+--extra-index-url https://download.pytorch.org/whl/cpu
+lerobot[training]==0.6.1
+# 아래는 2026-11-03에 설치된 실제 버전(참고용 고정). lerobot이 같은 버전을 고르지만 어긋나면 이쪽을 기준으로 본다.
+torch==2.11.0+cpu
+torchvision==0.26.0+cpu
+numpy==2.2.6
+pillow==12.3.0
