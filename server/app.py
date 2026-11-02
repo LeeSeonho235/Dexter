@@ -1,4 +1,4 @@
-"""브라우저 ↔ 서버 WebSocket (2-1: 연결만, 손 → 로봇 매핑은 2-2).
+"""브라우저 ↔ 서버 WebSocket + 손 → 로봇 제어(2-2).
 
 실행 (계속 켜져 있는 명령이므로 직접 띄운다):
     cd ~/handover && MUJOCO_GL=egl server/.venv/bin/python -m server.app
@@ -8,6 +8,8 @@
 - 서버 → 브라우저: JPEG 프레임(바이너리), state, pong, error(JSON 텍스트).
 - 연결마다 받기 작업과 보내기 작업을 따로 돌려서, 프레임 전송이 느려도 메시지 받기가 막히지 않는다.
   WebSocket에 send하는 곳은 보내기 작업 하나뿐이다.
+- 받은 hand는 제어 스레드(server/control.py)에 "최신 한 개"로 넘기기만 한다. 매핑과 역기구학 계산은 거기서 하므로
+  받기, 보내기, 렌더링이 막히지 않는다.
 """
 
 import os
@@ -26,6 +28,7 @@ from typing import Any  # noqa: E402
 from fastapi import FastAPI, WebSocket  # noqa: E402
 
 from server import config  # noqa: E402
+from server.control import ControlWorker  # noqa: E402
 from server.protocol import ProtocolError, hand_summary, parse_client_message  # noqa: E402
 from server.sim_worker import SimWorker  # noqa: E402
 
@@ -48,9 +51,10 @@ class Connection:
 class Hub:
     """연결 목록과 시뮬레이션 스레드를 잇는다."""
 
-    def __init__(self, worker: SimWorker, loop: asyncio.AbstractEventLoop) -> None:
+    def __init__(self, worker: SimWorker, loop: asyncio.AbstractEventLoop, control: ControlWorker) -> None:
         self.worker = worker
         self.loop = loop
+        self.control = control
         self.connections: set[Connection] = set()
 
     def add(self, conn: Connection) -> None:
@@ -90,6 +94,7 @@ def create_app(worker_factory=None) -> FastAPI:
             shadow=config.RENDER_SHADOW,
             reflection=config.RENDER_REFLECTION,
             on_frame=on_frame,
+            tick_hz=config.SIM_TICK_HZ,
         )
 
     factory = worker_factory or default_factory
@@ -99,15 +104,21 @@ def create_app(worker_factory=None) -> FastAPI:
         loop = asyncio.get_running_loop()
         hub_ref: list[Hub] = []
         worker = factory(lambda seq, jpeg: hub_ref[0].on_frame_from_thread(seq, jpeg))
-        hub = Hub(worker, loop)
+        control = ControlWorker(worker)
+        hub = Hub(worker, loop, control)
         hub_ref.append(hub)
-        # Renderer 생성(수백 ms)이 루프를 막지 않게 스레드에서 기다린다.
+        # Renderer 생성(수백 ms)과 IK 모델 읽기가 루프를 막지 않게 스레드에서 기다린다.
         await asyncio.to_thread(worker.start)
+        await asyncio.to_thread(control.start)
         app.state.hub = hub
-        log.info("sim worker started (camera=%s, %d fps)", config.CAMERA, config.FRAME_FPS)
+        log.info(
+            "sim worker started (camera=%s, %d fps, tick %d Hz), control %d Hz",
+            config.CAMERA, config.FRAME_FPS, config.SIM_TICK_HZ, config.CONTROL_HZ,
+        )
         try:
             yield
         finally:
+            await asyncio.to_thread(control.stop)
             await asyncio.to_thread(worker.stop)
 
     app = FastAPI(lifespan=lifespan)
@@ -118,8 +129,8 @@ def create_app(worker_factory=None) -> FastAPI:
         await websocket.accept()
         conn = Connection()
         hub.add(conn)
-        receiver = asyncio.create_task(_receive_loop(websocket, conn))
-        sender = asyncio.create_task(_send_loop(websocket, conn, hub.worker))
+        receiver = asyncio.create_task(_receive_loop(websocket, conn, hub.control))
+        sender = asyncio.create_task(_send_loop(websocket, conn, hub.worker, hub.control))
         try:
             done, _ = await asyncio.wait({receiver, sender}, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
@@ -131,11 +142,14 @@ def create_app(worker_factory=None) -> FastAPI:
                 with suppress(asyncio.CancelledError, Exception):
                     await task
             hub.remove(conn)
+            # 연결이 끊기면 손이 없는 것으로 본다(마지막 목표 유지, 다시 연결되면 시작 조건부터 다시 센다).
+            if not hub.connections:
+                hub.control.submit_hand(None)
 
     return app
 
 
-async def _receive_loop(websocket: WebSocket, conn: Connection) -> None:
+async def _receive_loop(websocket: WebSocket, conn: Connection, control: ControlWorker) -> None:
     while True:
         message = await websocket.receive()
         if message["type"] == "websocket.disconnect":
@@ -153,12 +167,13 @@ async def _receive_loop(websocket: WebSocket, conn: Connection) -> None:
         if msg["type"] == "hand":
             conn.hand_count += 1
             conn.last_hand = msg
+            control.submit_hand(msg, time.monotonic())
         elif msg["type"] == "ping":
             conn.pending_pongs.append(msg["id"])
             conn.wake.set()
 
 
-async def _send_loop(websocket: WebSocket, conn: Connection, worker: SimWorker) -> None:
+async def _send_loop(websocket: WebSocket, conn: Connection, worker: SimWorker, control: ControlWorker) -> None:
     next_state_s = time.monotonic()
     while True:
         timeout_s = max(0.0, next_state_s - time.monotonic())
@@ -177,11 +192,11 @@ async def _send_loop(websocket: WebSocket, conn: Connection, worker: SimWorker) 
             conn.frame = None
             await websocket.send_bytes(jpeg)
         if time.monotonic() >= next_state_s:
-            await websocket.send_text(json.dumps(_state_message(conn, worker)))
+            await websocket.send_text(json.dumps(_state_message(conn, worker, control)))
             next_state_s = time.monotonic() + config.STATE_SEND_INTERVAL_S
 
 
-def _state_message(conn: Connection, worker: SimWorker) -> dict[str, Any]:
+def _state_message(conn: Connection, worker: SimWorker, control: ControlWorker) -> dict[str, Any]:
     return {
         "type": "state",
         "hand_count": conn.hand_count,
@@ -189,6 +204,7 @@ def _state_message(conn: Connection, worker: SimWorker) -> dict[str, Any]:
         "last_hand": hand_summary(conn.last_hand) if conn.last_hand else None,
         "sim_time_s": round(worker.sim_time_s, 3),
         "frames_rendered": worker.frames_rendered,
+        "control": control.state(),
     }
 
 

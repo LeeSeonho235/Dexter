@@ -17,9 +17,13 @@ from collections.abc import Callable
 from pathlib import Path
 
 import mujoco
+import numpy as np
 from PIL import Image
 
 log = logging.getLogger(__name__)
+
+# 집게 끝 위치를 읽을 site 이름(server/config.py의 IK_SITE와 같다). sim_worker는 config에 의존하지 않게 상수로 둔다.
+TIP_SITE = "gripperframe"
 
 # (프레임 번호, JPEG bytes)를 받는 함수. 시뮬레이션 스레드에서 불리므로 빨리 끝나야 한다.
 FrameCallback = Callable[[int, bytes], None]
@@ -40,13 +44,18 @@ class SimWorker:
         shadow: bool = True,
         reflection: bool = True,
         on_frame: FrameCallback | None = None,
+        tick_hz: float | None = None,
     ) -> None:
+        """tick_hz: 물리 진행과 ctrl 반영 주기(Hz). 안 주면 frame_fps와 같다(2-1 동작).
+        화면 렌더링은 틱 N번에 한 번(N = tick_hz / frame_fps, 반올림), 화면 보는 브라우저가 있을 때만 한다."""
         self._scene_path = scene_path
         self._keyframe = keyframe
         self._camera = camera
         self._width_px = width_px
         self._height_px = height_px
-        self._tick_s = 1.0 / frame_fps
+        tick_hz = tick_hz or frame_fps
+        self._tick_s = 1.0 / tick_hz
+        self._render_every = max(1, round(tick_hz / frame_fps))
         self._jpeg_quality = jpeg_quality
         self._max_catch_up_s = max_catch_up_s
         self._shadow = shadow
@@ -58,6 +67,8 @@ class SimWorker:
         self._frames_rendered = 0
         self._sim_time_s = 0.0
         self._latest_frame: tuple[int, bytes] | None = None
+        self._ctrl: np.ndarray | None = None  # 제어 스레드가 정한 모터 목표(rad). None이면 keyframe의 ctrl 그대로
+        self._snapshot: dict | None = None  # 틱마다 갱신하는 읽기 전용 값(집게 끝 위치 등)
 
         self._stop = threading.Event()
         self._ready = threading.Event()
@@ -86,6 +97,20 @@ class SimWorker:
         """화면을 받는 브라우저 수. 0이면 렌더링을 멈춘다."""
         with self._lock:
             self._viewer_count = max(0, count)
+
+    def set_ctrl(self, ctrl: np.ndarray) -> None:
+        """모터 목표(관절 6개, rad)를 정한다. 다음 틱부터 적용된다. 크기가 다르거나 NaN이 있으면 ValueError."""
+        ctrl = np.asarray(ctrl, dtype=float).copy()
+        if ctrl.shape != (6,) or not np.all(np.isfinite(ctrl)):
+            raise ValueError("ctrl must be 6 finite numbers")
+        with self._lock:
+            self._ctrl = ctrl
+
+    @property
+    def snapshot(self) -> dict | None:
+        """가장 최근 틱의 값: tip_m(집게 끝 x,y,z m), joints_rad(관절 6개), block_m(블록 중심 x,y,z m). 시작 전이면 None."""
+        with self._lock:
+            return self._snapshot
 
     @property
     def is_alive(self) -> bool:
@@ -138,8 +163,16 @@ class SimWorker:
         wall_start_s = time.monotonic()
         offset_s = data.time
         next_tick_s = wall_start_s
+        tip_site_id = model.site(TIP_SITE).id
+        block_body_id = model.body("block").id
+        tick_count = 0
 
         while not self._stop.is_set():
+            tick_count += 1
+            with self._lock:
+                ctrl = self._ctrl
+            if ctrl is not None:
+                data.ctrl[:6] = ctrl
             target_sim_s = time.monotonic() - wall_start_s + offset_s
             if target_sim_s - data.time > self._max_catch_up_s:
                 offset_s -= target_sim_s - data.time - self._max_catch_up_s
@@ -147,19 +180,28 @@ class SimWorker:
             while data.time + timestep_s <= target_sim_s:
                 mujoco.mj_step(model, data)
 
+            # mj_step 뒤의 site, body 위치는 한 스텝 전 값이라 위치만 다시 계산한다(상태는 안 바뀐다).
+            mujoco.mj_kinematics(model, data)
+            snapshot = {
+                "tip_m": data.site_xpos[tip_site_id].copy(),
+                "joints_rad": data.qpos[:6].copy(),
+                "block_m": data.xpos[block_body_id].copy(),
+            }
             with self._lock:
                 self._sim_time_s = data.time
+                self._snapshot = snapshot
                 should_render = self._viewer_count > 0
 
-            if should_render:
+            if should_render and tick_count % self._render_every == 0:
                 self._render_and_publish(renderer, data)
 
             next_tick_s += self._tick_s
             now_s = time.monotonic()
-            if next_tick_s < now_s:
-                # 렌더링이 틱보다 오래 걸렸으면 밀린 틱을 몰아서 하지 않는다.
+            if next_tick_s < now_s - self._tick_s:
+                # 한 틱보다 더 밀렸으면 밀린 틱을 몰아서 하지 않는다. 한 틱 안쪽으로 밀린 것은 그대로 둬서
+                # 렌더링 틱(약 55ms) 뒤에 빠른 틱이 바로 따라오게 한다. 리셋하면 틱 30Hz에서 화면이 15fps에 못 미친다.
                 next_tick_s = now_s
-            self._stop.wait(next_tick_s - now_s)
+            self._stop.wait(max(0.0, next_tick_s - now_s))
 
     def _render_and_publish(self, renderer: mujoco.Renderer, data: mujoco.MjData) -> None:
         renderer.update_scene(data, camera=self._camera)

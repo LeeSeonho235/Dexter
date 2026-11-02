@@ -2,9 +2,14 @@
 
 import { useEffect, useRef } from 'react'
 import { DrawingUtils } from '@mediapipe/tasks-vision'
-import { VIDEO_HEIGHT_PX, VIDEO_WIDTH_PX } from '../hand/config.js'
+import { CONTROL_HANDEDNESS, VIDEO_HEIGHT_PX, VIDEO_WIDTH_PX } from '../hand/config.js'
 import { makeHandMessage } from '../hand/features.js'
+import { selectHand } from '../hand/select.js'
 import { createHandTracker, HandLandmarker } from '../hand/tracker.js'
+
+// 조종 손은 굵은 노란 선, 나머지 손은 회색 (조종에 쓰지 않는다)
+const CONTROL_STYLE = { line: '#ffd400', lineWidth: 6, point: '#00ff66', radius: 5 }
+const OTHER_STYLE = { line: '#777777', lineWidth: 2, point: '#999999', radius: 3 }
 
 export default function HandView({ onHand, onStatus }) {
   const videoRef = useRef(null)
@@ -51,17 +56,19 @@ export default function HandView({ onHand, onStatus }) {
           lastVideoTime = video.currentTime
           const now = performance.now()
           const result = landmarker.detectForVideo(video, now)
-          const landmarks = result.landmarks[0]
+          // 손은 2개까지 인식하되 라벨이 맞는 손 하나만 조종에 쓴다. 다른 손은 서버로 보내지 않는다.
+          const selection = selectHand(result, CONTROL_HANDEDNESS)
 
           ctx.clearRect(0, 0, canvas.width, canvas.height)
-          if (landmarks) {
+          result.landmarks.forEach((landmarks, index) => {
+            const style = index === selection.chosen?.index ? CONTROL_STYLE : OTHER_STYLE
             drawer.drawConnectors(landmarks, HandLandmarker.HAND_CONNECTIONS, {
-              color: '#00d0ff',
-              lineWidth: 3,
+              color: style.line,
+              lineWidth: style.lineWidth,
             })
-            drawer.drawLandmarks(landmarks, { color: '#00ff66', lineWidth: 1, radius: 4 })
-          }
-          onHand(makeHandMessage(landmarks, { t: Date.now() / 1000, aspect }))
+            drawer.drawLandmarks(landmarks, { color: style.point, lineWidth: 1, radius: style.radius })
+          })
+          onHand(makeHandMessage(selection.chosen?.landmarks, { t: Date.now() / 1000, aspect }), selection)
 
           frames += 1
           if (now - fpsStart >= 1000) {

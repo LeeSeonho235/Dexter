@@ -115,3 +115,104 @@ button {
   font-size: 13px;
   color: #888;
 }
+
+/* 조종 중인 손 표시 */
+.control-hand {
+  max-width: 640px;
+}
+
+.control-hand p {
+  margin: 4px 0;
+}
+
+.control-hand-on {
+  font-size: 18px;
+  font-weight: 600;
+  color: #b58900;
+}
+
+.control-hand-off {
+  font-size: 18px;
+  font-weight: 600;
+  color: #d03030;
+}
+
+/* 로봇 상태: 집게 높이 막대와 열림/닫힘 */
+.robot-panel {
+  max-width: 640px;
+}
+
+.robot-status {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0 0 8px;
+}
+
+.robot-indicators {
+  display: flex;
+  gap: 24px;
+  align-items: flex-start;
+  margin-bottom: 12px;
+}
+
+.height-bar-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.height-bar-track {
+  position: relative;
+  width: 44px;
+  height: 140px;
+  border: 1px solid #8886;
+  background: #8882;
+}
+
+.height-bar-fill {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: #2f80ed;
+}
+
+.height-bar-target {
+  position: absolute;
+  left: -4px;
+  right: -4px;
+  height: 0;
+  border-top: 2px solid #1a9c3c;
+}
+
+.height-bar-value {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 15px;
+  margin-top: 4px;
+}
+
+.height-bar-scale {
+  font-size: 12px;
+  color: #888;
+}
+
+.gripper-badge {
+  display: inline-block;
+  min-width: 5em;
+  text-align: center;
+  padding: 10px 14px;
+  font-size: 22px;
+  font-weight: 700;
+  border-radius: 6px;
+  background: #8883;
+}
+
+.gripper-badge.open {
+  background: #1a9c3c;
+  color: #fff;
+}
+
+.gripper-badge.closed {
+  background: #d03030;
+  color: #fff;
+}
