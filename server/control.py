@@ -6,6 +6,9 @@
   메시지가 없어도 CONTROL_HZ 주기로 한 번씩 돈다. 틱마다 ctrl이 goal 쪽으로 움직이되, 한 틱(1/CONTROL_HZ초)당 최대
   변화량 × (지난 걸음 이후 흐른 시간 / 한 틱)만큼만 움직인다. 그래서 메시지가 언제 오든 속도 상한(rad/s)이 같고,
   처음 손을 인식했을 때도 로봇이 튀지 않는다.
+- 키보드 높이(2-5): submit_height()로 받은 명령(dir, slow)을 HeightCommands가 "방향 × 속도 × 흐른 시간"으로 바꾸고,
+  매퍼의 목표 z에 더한다(손이 안 보여도 동작, 조종이 한 번도 시작되지 않았으면 무시). 손 메시지와 같은 틱에 겹쳐도
+  IK는 한 번만 풀고, 결과는 똑같이 변화량 제한을 거쳐 ctrl로 간다.
 - IK가 실패하거나 NaN이 나오면 goal을 바꾸지 않는다(ctrl은 직전 goal 쪽으로 계속 가던 대로 간다). 실패 횟수를 센다.
   어떤 예외가 나도 스레드는 죽지 않고 loop_error_count만 올린다.
 - 시각은 모두 서버의 time.monotonic()(s). 브라우저 시계와 섞지 않는다.
@@ -22,6 +25,7 @@ import numpy as np
 
 from server import config
 from server.gripper import GripperLatch
+from server.height import HeightCommands
 from server.ik import ArmIK, limit_joint_step
 from server.mapping import HandMapper
 from server.sim_worker import SimWorker
@@ -77,7 +81,15 @@ class ControlWorker:
     ) -> None:
         self._sim = sim
         self._ik_factory = ik_factory
-        self._mapper = mapper or HandMapper()
+        # 설정값 MAPPING_MODE(기본 "relative"), Z_FROM_HAND_SCALE(기본 False: 높이는 키보드)을 여기서 넘긴다.
+        # HandMapper 자체의 기본값은 "absolute"와 z_from_hand_scale=True(2-2, 2-4 동작)다.
+        self._mapper = mapper or HandMapper(mode=config.MAPPING_MODE, z_from_hand_scale=config.Z_FROM_HAND_SCALE)
+        self._height = HeightCommands(
+            config.HEIGHT_SPEED_M_S,
+            config.HEIGHT_SLOW_SPEED_M_S,
+            config.HEIGHT_COMMAND_TIMEOUT_S,
+            config.HEIGHT_MAX_DT_S,
+        )
         self._gripper = gripper or GripperLatch(config.PINCH_CLOSE_BELOW, config.PINCH_OPEN_ABOVE)
         self._tick_s = 1.0 / control_hz
         self._clock = clock
@@ -97,6 +109,8 @@ class ControlWorker:
         self._controlling = False
         self._consecutive = 0
         self._target_m: np.ndarray | None = None
+        self._reference_hand: tuple[float, float] | None = None  # 상대 모드 기준 손 위치(영상 정규화 좌표)
+        self._azimuth_deg = 0.0  # 마지막으로 매핑에 쓴 보기 방위각
         self._ik_fail_count = 0
         self._ik_last_failure = ""
         self._loop_error_count = 0
@@ -134,6 +148,13 @@ class ControlWorker:
             self._pending = (hand, self._clock() if recv_s is None else recv_s)
         self._wake.set()
 
+    def submit_height(self, direction: int, slow: bool, recv_s: float | None = None) -> None:
+        """검사를 통과한 키보드 높이 명령(dir -1/0/1, slow)을 넣는다. 받은 순서대로 기록되어 시각 기준으로 계산된다.
+        조종이 한 번도 시작되지 않았다면 무시된다(목표가 없다)."""
+        with self._lock:
+            self._height.command(direction, slow, self._clock() if recv_s is None else recv_s)
+        self._wake.set()
+
     def state(self) -> dict:
         """상태 메시지에 넣을 값(JSON으로 보낼 수 있는 것만)."""
         snapshot = self._sim.snapshot
@@ -142,6 +163,15 @@ class ControlWorker:
         now_s = self._clock()
         with self._lock:
             target_m = self._target_m
+            height_dir, height_slow = self._height.effective(now_s)
+            height_limit = self._mapper.height_limit
+            # 키보드 높이가 지금 실제로 움직이는 중인가: 방향이 있고, 목표가 있고(조종이 시작됐고), 그 방향의 상자 끝이 아니다.
+            height_active = (
+                height_dir != 0
+                and self._mapper.last_target_m is not None
+                and not (height_dir > 0 and height_limit == "top")
+                and not (height_dir < 0 and height_limit == "bottom")
+            )
             error_m = None
             if target_m is not None and tip_m is not None:
                 error_m = float(np.linalg.norm(tip_m - target_m))
@@ -152,6 +182,18 @@ class ControlWorker:
                 "controlling": self._controlling,
                 "consecutive_frames": self._consecutive,
                 "start_frames": self._mapper.start_frames,
+                "mapping_mode": self._mapper.mode,
+                # 상대 모드에서 클러치가 잡혀 있는 동안의 기준 손 위치(영상 정규화 x, y). 브라우저가 십자를 그린다.
+                "reference_hand": _round_list(self._reference_hand, 4),
+                "view_azimuth_deg": round(self._azimuth_deg, 2),
+                # 키보드 높이(2-5): 유효 방향(-1 내림, 0 정지, 1 올림, 타임아웃 반영), 천천히 여부, 지금 움직이는지,
+                # 목표 z(m), 상자 끝에 닿았는지("top"/"bottom"/None), 손 크기로도 높이를 정하는지
+                "height_dir": height_dir,
+                "height_slow": height_slow,
+                "height_active": height_active,
+                "height_limit": height_limit,
+                "target_z_m": None if target_m is None else round(float(target_m[2]), 4),
+                "z_from_hand_scale": self._mapper.z_from_hand_scale,
                 "target_m": _round_list(target_m),
                 "tip_m": _round_list(tip_m),
                 "error_m": None if error_m is None else round(error_m, 4),
@@ -171,6 +213,14 @@ class ControlWorker:
             }
 
     # --- 제어 스레드 ---
+
+    def _view_azimuth_deg(self) -> float:
+        """매핑에 쓸 보기 방위각(도). 자유 카메라가 아니면(고정 top 카메라) 위에서 보기와 같은 0°.
+        view를 모르는 시뮬레이션(테스트용 가짜)도 0°다."""
+        view = getattr(self._sim, "view", None)
+        if view is None or not getattr(self._sim, "uses_free_camera", True):
+            return 0.0
+        return float(view.azimuth_deg)
 
     def _home_ctrl(self) -> np.ndarray:
         assert self._ik is not None
@@ -193,31 +243,49 @@ class ControlWorker:
         """한 틱: 새 hand 메시지 처리 → ctrl 한 걸음. 스레드가 메시지가 올 때와 CONTROL_HZ 주기로 부른다."""
         with self._lock:
             pending, self._pending = self._pending, None
-        processed_recv_s: float | None = None
+        hand_changed_target = False
+        recv_s = 0.0
         if pending is not None:
             hand, recv_s = pending
-            if self._on_new_hand(hand, recv_s):
+            hand_changed_target = self._on_new_hand(hand, recv_s)
+        height_changed_target = self._apply_keyboard_height()
+
+        # 손 메시지와 키보드 높이가 같은 틱에 겹쳐도 IK는 한 번만 푼다. 결과는 변화량 제한을 거쳐 ctrl로 간다.
+        processed_recv_s: float | None = None
+        if hand_changed_target or height_changed_target:
+            solved = self._solve_goal(self._mapper.last_target_m)
+            if solved and hand_changed_target:
                 processed_recv_s = recv_s
         self._step_ctrl(processed_recv_s)
 
-    def _on_new_hand(self, hand: dict | None, recv_s: float) -> bool:
-        """새 메시지로 목표와 goal을 갱신한다. 이번 메시지의 IK 결과가 goal에 반영되면 True."""
-        assert self._ik is not None
-        result = self._mapper.update(hand, recv_s)
+    def _apply_keyboard_height(self) -> bool:
+        """키보드 높이 명령을 흐른 시간만큼 목표 z에 반영한다. 목표 z가 바뀌었으면 True.
+
+        조종이 한 번도 시작되지 않아 목표가 없으면 무시한다(키보드로 로봇이 갑자기 움직이는 사고를 막는다).
+        손이 안 보이는 동안에도 마지막 목표의 z는 바꾼다.
+        """
+        now_s = self._clock()
         with self._lock:
-            self._controlling = result.controlling
-            self._consecutive = result.consecutive_frames
-            self._target_m = result.target_m
-        if not result.new_sample or result.target_m is None:
+            dz_m = self._height.advance(now_s)
+            if self._mapper.last_target_m is None:
+                self._height.reset()  # 조종 시작 전 명령은 모두 버린다
+                return False
+        if dz_m == 0.0:
             return False
-
-        self._gripper.update(hand["pinch_ratio"])
+        before = self._mapper.last_target_m
+        target = self._mapper.nudge_height(dz_m)
+        if target is None or before is None or target[2] == before[2]:
+            return False  # 상자 끝에 막혀 높이가 그대로
         with self._lock:
-            self._samples.append((recv_s, result.raw_target_m.copy(), result.target_m.copy()))
-            while self._samples and self._samples[0][0] < recv_s - config.JITTER_WINDOW_S:
-                self._samples.popleft()
+            self._target_m = target
+        return True
 
-        ik_result = self._ik.solve(result.target_m)
+    def _solve_goal(self, target_m: np.ndarray | None) -> bool:
+        """목표 위치를 IK로 풀어 goal(관절 목표)을 갱신한다. 실패하면 goal을 바꾸지 않고 실패 횟수를 센다."""
+        assert self._ik is not None
+        if target_m is None:
+            return False
+        ik_result = self._ik.solve(target_m)
         with self._lock:
             self._ik_ms.add(ik_result.elapsed_ms)
             if not ik_result.ok:
@@ -226,6 +294,26 @@ class ControlWorker:
         if not ik_result.ok:
             return False
         self._goal_arm_rad = ik_result.q_rad
+        return True
+
+    def _on_new_hand(self, hand: dict | None, recv_s: float) -> bool:
+        """새 손 메시지로 목표를 갱신한다(IK는 tick에서 푼다). 이번 메시지가 새 목표를 만들었으면 True."""
+        azimuth_deg = self._view_azimuth_deg()
+        result = self._mapper.update(hand, recv_s, azimuth_deg)
+        with self._lock:
+            self._controlling = result.controlling
+            self._consecutive = result.consecutive_frames
+            self._target_m = result.target_m
+            self._reference_hand = result.reference_hand if result.controlling else None
+            self._azimuth_deg = azimuth_deg
+        if not result.new_sample or result.target_m is None:
+            return False
+
+        self._gripper.update(hand["pinch_ratio"])
+        with self._lock:
+            self._samples.append((recv_s, result.raw_target_m.copy(), result.target_m.copy()))
+            while self._samples and self._samples[0][0] < recv_s - config.JITTER_WINDOW_S:
+                self._samples.popleft()
         return True
 
     def _step_ctrl(self, processed_recv_s: float | None) -> None:

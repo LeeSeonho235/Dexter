@@ -1,17 +1,22 @@
 // 파이썬 서버와의 WebSocket 연결 (React에 의존하지 않음).
 //
-// 보내는 것: hand 메시지(JSON 텍스트, 최대 HAND_SEND_MAX_HZ), ping. 웹캠 영상·이미지는 보내지 않는다.
+// 보내는 것: hand 메시지(JSON 텍스트, 최대 HAND_SEND_MAX_HZ), view(보기 방향, 최대 VIEW_SEND_MAX_HZ),
+// height(키보드 높이, 누르는 동안 HEIGHT_REPEAT_HZ), ping.
+// 웹캠 영상·이미지는 보내지 않는다.
 // 받는 것: 시뮬레이션 화면 JPEG(바이너리) → onFrame(blob), state/pong/error(JSON 텍스트).
 // 끊기면 RECONNECT_DELAY_MS 뒤 다시 연결한다.
 
+import { viewMessage } from '../view/camera.js'
 import {
   HAND_SEND_MAX_HZ,
   PING_INTERVAL_MS,
   RATE_WINDOW_MS,
   RECONNECT_DELAY_MS,
+  VIEW_SEND_MAX_HZ,
   WS_PATH,
 } from './config.js'
 import { createRateCounter, createRateLimiter } from './rate.js'
+import { createTrailingThrottle } from './throttle.js'
 
 // http 페이지면 ws://, https면 wss://. 주소는 지금 페이지와 같은 곳(Vite 프록시)이다.
 export function wsUrl(location, path = WS_PATH) {
@@ -30,6 +35,9 @@ export class SimConnection {
     onFrame = () => {},
     onState = () => {},
     maxHandHz = HAND_SEND_MAX_HZ,
+    maxViewHz = VIEW_SEND_MAX_HZ,
+    setTimer = (fn, ms) => setTimeout(fn, ms),
+    clearTimer = (id) => clearTimeout(id),
     pingIntervalMs = PING_INTERVAL_MS,
     reconnectDelayMs = RECONNECT_DELAY_MS,
   }) {
@@ -42,6 +50,13 @@ export class SimConnection {
     this.reconnectDelayMs = reconnectDelayMs
 
     this.shouldSendHand = createRateLimiter(maxHandHz)
+    // 보기 방향은 최대 maxViewHz로 보내되 마지막 값은 반드시 보낸다(드래그가 끝난 자리에서 화면이 멈추게).
+    this.viewThrottle = createTrailingThrottle((view) => this.sendViewNow(view), {
+      maxHz: maxViewHz,
+      now,
+      setTimer,
+      clearTimer,
+    })
     this.handRate = createRateCounter(RATE_WINDOW_MS)
     this.frameRate = createRateCounter(RATE_WINDOW_MS)
 
@@ -68,6 +83,7 @@ export class SimConnection {
     this.stopped = true
     clearTimeout(this.reconnectTimer)
     this.reconnectTimer = null
+    this.viewThrottle.cancel()
     this.teardownSocket()
     this.phase = 'idle'
   }
@@ -80,6 +96,27 @@ export class SimConnection {
     if (!this.shouldSendHand(nowMs)) return false
     this.ws.send(JSON.stringify(msg))
     this.handRate.add(nowMs)
+    return true
+  }
+
+  // 보기 방향({azimuth_deg, elevation_deg, distance_m})을 서버에 알린다. 빈도 제한(VIEW_SEND_MAX_HZ)이 있고,
+  // 너무 자주 부르면 최신 값만 남겨 두었다가 허용 시각에 보낸다.
+  requestView(view) {
+    this.viewThrottle.push(view)
+  }
+
+  sendViewNow(view) {
+    if (!this.ws || this.ws.readyState !== OPEN) return false
+    this.ws.send(JSON.stringify(viewMessage(view)))
+    return true
+  }
+
+  // 키보드 높이 메시지({type:'height', dir, slow})를 보낸다. 빈도는 호출하는 쪽(input/heightKeys.js)이 20Hz로 맞춘다.
+  // 연결이 열려 있지 않으면 false(끊긴 연결로는 보낼 수 없다. 서버는 0.3초 타임아웃으로 멈춘다).
+  sendHeight(msg) {
+    if (!this.ws || this.ws.readyState !== OPEN) return false
+    if (!msg || msg.type !== 'height') return false
+    this.ws.send(JSON.stringify(msg))
     return true
   }
 

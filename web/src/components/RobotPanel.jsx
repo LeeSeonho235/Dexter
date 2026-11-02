@@ -2,9 +2,12 @@
 // 위에서 본 화면만으로는 집게 높이를 알기 어려워서(렌더링을 더 하면 CPU를 더 쓴다) 숫자와 막대로 보여준다.
 
 import { HEIGHT_BAR_MAX_M } from '../robot/config.js'
-import { barFraction, controlStatusText, fmtNum, fmtStats, fmtVec } from '../robot/view.js'
+import { barFraction, controlStatusText, fmtNum, fmtStats, fmtVec, heightHint } from '../robot/view.js'
 
-export default function RobotPanel({ control, connected }) {
+const IDLE_KEYS = { dir: 0, slow: false, down: false, up: false, shift: false }
+
+// keys: 지금 눌린 높이 키 상태(input/useHeightKeys.js). 키캡은 누르는 곳이 아니라 눌린 키를 보여 주는 표시다.
+export default function RobotPanel({ control, connected, keys = IDLE_KEYS }) {
   const c = connected ? control : null
   const tipZ = c?.tip_m?.[2]
   const targetZ = c?.target_m?.[2]
@@ -38,16 +41,39 @@ export default function RobotPanel({ control, connected }) {
           <div className="height-bar-scale">0 ~ {(HEIGHT_BAR_MAX_M * 100).toFixed(0)} cm, 가로선 = 목표</div>
         </div>
 
-        <div className="gripper-state">
-          <div className="height-bar-title">집게</div>
-          <div className={closed == null ? 'gripper-badge' : closed ? 'gripper-badge closed' : 'gripper-badge open'}>
-            {closed == null ? '—' : closed ? '닫힘' : '열림'}
+        {/* 누르는 버튼이 아니라 표시등이다. 엄지·검지를 붙였는지에 따라 서버가 정한 상태를 보여 준다. */}
+        <div className="gripper-state" role="status">
+          <div className="height-bar-title">집게 상태 (표시등, 버튼 아님)</div>
+          <div className="gripper-lamp">
+            <span className={closed == null ? 'gripper-dot' : closed ? 'gripper-dot closed' : 'gripper-dot open'} />
+            <span className="gripper-text">{closed == null ? '—' : closed ? '닫힘' : '열림'}</span>
+          </div>
+          <div className="gripper-help">
+            엄지·검지를 붙이면 닫힘.
+            <br />
+            클릭하는 버튼이 아님.
           </div>
           <div className="height-bar-scale">
             목표 {fmtNum(c?.gripper_goal_rad, 2)} rad
             <br />
             실제 {fmtNum(c?.gripper_rad, 2)} rad
           </div>
+        </div>
+
+        <div className="keyboard-box" role="group" aria-label="키보드 조작">
+          <div className="height-bar-title">키보드 조작</div>
+          <div className="keycaps">
+            <span className={keys.up ? 'keycap pressed' : 'keycap'}>
+              ↑<small>W</small>
+            </span>
+            <span className={keys.down ? 'keycap pressed' : 'keycap'}>
+              ↓<small>S</small>
+            </span>
+            <span className={keys.shift ? 'keycap keycap-wide pressed' : 'keycap keycap-wide'}>Shift</span>
+          </div>
+          <div className="keyboard-help">높이: ↓ 내리기 / ↑ 올리기 (Shift = 천천히)</div>
+          <div className="keyboard-status">{heightHint(c) || ' '}</div>
+          {c?.z_from_hand_scale && <div className="height-bar-scale">손 크기도 높이에 반영 (설정 켜짐)</div>}
         </div>
       </div>
 

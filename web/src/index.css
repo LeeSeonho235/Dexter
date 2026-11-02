@@ -196,23 +196,209 @@ button {
   color: #888;
 }
 
-.gripper-badge {
-  display: inline-block;
-  min-width: 5em;
-  text-align: center;
-  padding: 10px 14px;
+/* 집게 상태 표시등: 눌러지는 버튼처럼 보이지 않게 채운 칸 대신 점 + 글자, 커서도 기본, 선택도 안 됨 */
+.gripper-state {
+  max-width: 230px;
+  cursor: default;
+  user-select: none;
+}
+
+.gripper-lamp {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-size: 22px;
   font-weight: 700;
-  border-radius: 6px;
-  background: #8883;
 }
 
-.gripper-badge.open {
+.gripper-dot {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #8886;
+}
+
+.gripper-dot.open {
   background: #1a9c3c;
+}
+
+.gripper-dot.closed {
+  background: #d03030;
+}
+
+.gripper-help {
+  font-size: 13px;
+  margin: 4px 0;
+}
+
+/* 키보드 조작 상자: 키캡은 눌린 키를 보여 주는 표시(누르는 버튼이 아니다) */
+.keyboard-box {
+  max-width: 230px;
+  cursor: default;
+  user-select: none;
+}
+
+.keycaps {
+  display: flex;
+  gap: 6px;
+  margin: 4px 0;
+}
+
+.keycap {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-width: 36px;
+  height: 36px;
+  padding: 0 6px;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1;
+  border: 1px solid #8886;
+  border-bottom-width: 3px;
+  border-radius: 6px;
+  background: #8882;
+}
+
+.keycap small {
+  font-size: 10px;
+  font-weight: 600;
+  color: #888;
+}
+
+.keycap-wide {
+  min-width: 56px;
+  font-size: 13px;
+}
+
+.keycap.pressed {
+  background: #2f80ed;
+  border-color: #1b5fc1;
+  border-bottom-width: 1px;
   color: #fff;
 }
 
-.gripper-badge.closed {
-  background: #d03030;
+.keycap.pressed small {
+  color: #dbe8ff;
+}
+
+.keyboard-help {
+  font-size: 13px;
+  margin: 4px 0;
+}
+
+.keyboard-status {
+  font-size: 13px;
+  font-weight: 600;
+  min-height: 1.3em;
+}
+
+/* 시뮬레이션 화면 + 보기 방향 조작 */
+.sim-column {
+  width: 640px;
+  max-width: 100%;
+}
+
+.preset-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.preset-row button {
+  margin-bottom: 0;
+  font-size: 14px;
+}
+
+.preset-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.sim-view-interactive {
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.sim-view-interactive:active {
+  cursor: grabbing;
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  margin-top: 6px;
+  font-size: 14px;
+}
+
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.legend-swatch {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 1px solid #0006;
+}
+
+.legend-block {
+  background: #d92626;
+}
+
+.legend-target {
+  background: #2ecc40;
+}
+
+.view-readout {
+  margin-left: auto;
+  font-family: ui-monospace, Consolas, monospace;
+}
+
+/* 손 방향 안내 한 줄(2-3의 노란 경고 상자를 대체) */
+.hand-direction-note {
+  margin: 6px 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+/* 시뮬레이션 화면 오른쪽 위 모서리의 방향 나침반. 클릭을 받지 않아 끌기를 방해하지 않는다. */
+.view-compass {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 150px;
+  height: 128px;
+  pointer-events: none;
+}
+
+/* 웹캠 화면: 손이 가장자리 10% 안쪽에 들어오면 테두리를 빨갛게 */
+.hand-view.edge-warning {
+  outline: 6px solid #e02020;
+  outline-offset: -6px;
+}
+
+.control-state {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 4px 0;
+}
+
+.edge-message {
+  margin: 6px 0;
+  padding: 6px 10px;
+  font-size: 14px;
+  font-weight: 700;
   color: #fff;
+  background: #c62828;
+  border-radius: 4px;
 }

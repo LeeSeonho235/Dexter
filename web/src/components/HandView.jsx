@@ -3,6 +3,7 @@
 import { useEffect, useRef } from 'react'
 import { DrawingUtils } from '@mediapipe/tasks-vision'
 import { CONTROL_HANDEDNESS, VIDEO_HEIGHT_PX, VIDEO_WIDTH_PX } from '../hand/config.js'
+import { overlayGeometry } from '../hand/edge.js'
 import { makeHandMessage } from '../hand/features.js'
 import { selectHand } from '../hand/select.js'
 import { createHandTracker, HandLandmarker } from '../hand/tracker.js'
@@ -11,9 +12,44 @@ import { createHandTracker, HandLandmarker } from '../hand/tracker.js'
 const CONTROL_STYLE = { line: '#ffd400', lineWidth: 6, point: '#00ff66', radius: 5 }
 const OTHER_STYLE = { line: '#777777', lineWidth: 2, point: '#999999', radius: 3 }
 
-export default function HandView({ onHand, onStatus }) {
+// 상대 모드 안내: 기준점은 십자(하늘색), 지금 손목은 점(주황), 둘 사이는 선(흰색 점선). 캔버스는 CSS로 영상과 같이 좌우가
+// 뒤집혀 보이므로 점 좌표를 그대로 쓰면 영상 위의 손과 같은 자리에 그려진다. 글자는 캔버스가 아니라 HTML로 보여 준다.
+function drawReferenceOverlay(ctx, geometry) {
+  const { cross, dot, line } = geometry
+  ctx.save()
+  ctx.setLineDash([6, 5])
+  ctx.strokeStyle = '#ffffff'
+  ctx.lineWidth = 2
+  ctx.beginPath()
+  ctx.moveTo(line.x1, line.y1)
+  ctx.lineTo(line.x2, line.y2)
+  ctx.stroke()
+  ctx.setLineDash([])
+  ctx.strokeStyle = '#00e5ff'
+  ctx.lineWidth = 3
+  ctx.beginPath()
+  ctx.moveTo(cross.x - cross.half, cross.y)
+  ctx.lineTo(cross.x + cross.half, cross.y)
+  ctx.moveTo(cross.x, cross.y - cross.half)
+  ctx.lineTo(cross.x, cross.y + cross.half)
+  ctx.stroke()
+  ctx.fillStyle = '#ff9100'
+  ctx.beginPath()
+  ctx.arc(dot.x, dot.y, 7, 0, Math.PI * 2)
+  ctx.fill()
+  ctx.restore()
+}
+
+// edge: 손이 영상 가장자리 10% 안쪽에 들어왔는가(테두리를 빨갛게). reference: 서버가 알려 준 기준 손 위치 [x, y]
+// (정규화, 상대 모드에서 조종 중일 때만 값이 있다). mode: 'relative' | 'absolute'
+export default function HandView({ onHand, onStatus, edge = false, reference = null, mode = null }) {
   const videoRef = useRef(null)
   const canvasRef = useRef(null)
+  const overlayRef = useRef({ reference: null, mode: null }) // 그리기 루프가 최신 값을 읽도록 ref에 둔다
+
+  useEffect(() => {
+    overlayRef.current = { reference, mode }
+  }, [reference, mode])
 
   useEffect(() => {
     let cancelled = false
@@ -68,6 +104,16 @@ export default function HandView({ onHand, onStatus }) {
             })
             drawer.drawLandmarks(landmarks, { color: style.point, lineWidth: 1, radius: style.radius })
           })
+          const overlay = overlayRef.current
+          const wristPoint = selection.chosen?.landmarks[0]
+          if (overlay.mode === 'relative' && wristPoint) {
+            const geometry = overlayGeometry(
+              { reference: overlay.reference, wrist: [wristPoint.x, wristPoint.y] },
+              canvas.width,
+              canvas.height,
+            )
+            if (geometry) drawReferenceOverlay(ctx, geometry)
+          }
           onHand(makeHandMessage(selection.chosen?.landmarks, { t: Date.now() / 1000, aspect }), selection)
 
           frames += 1
@@ -101,7 +147,7 @@ export default function HandView({ onHand, onStatus }) {
   }, [onHand, onStatus])
 
   return (
-    <div className="hand-view">
+    <div className={edge ? 'hand-view edge-warning' : 'hand-view'}>
       <video ref={videoRef} className="mirror" playsInline muted />
       <canvas ref={canvasRef} className="mirror" />
     </div>

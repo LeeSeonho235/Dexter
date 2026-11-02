@@ -17,5 +17,8 @@ export const NUM_HANDS = 2
 // 반대면 이 값을 바꾼다.
 export const CONTROL_HANDEDNESS = 'Right'
 
+// 손이 영상 가장자리에 이만큼(영상 너비·높이 대비 비율) 가까워지면 경고한다. 가장자리에서는 손가락이 화면 밖으로 나가 인식이 끊긴다.
+export const EDGE_MARGIN = 0.1
+
 // palm_open 판정: 손목→손끝 거리가 손목→둘째 마디(PIP) 거리 × 이 값보다 크면 "펴짐" (단위 없음)
 export const FINGER_OPEN_MARGIN = 1.1

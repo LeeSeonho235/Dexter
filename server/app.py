@@ -4,7 +4,7 @@
     cd ~/handover && MUJOCO_GL=egl server/.venv/bin/python -m server.app
 
 - 127.0.0.1:PORT(server/config.py)에서만 연다. 브라우저는 Vite 프록시 '/ws'로 붙는다.
-- 브라우저 → 서버: hand(숫자만), ping. 바이너리(영상·이미지)는 받지 않는다.
+- 브라우저 → 서버: hand(숫자만), ping, view(보기 방향), height(키보드 높이). 바이너리(영상·이미지)는 받지 않는다.
 - 서버 → 브라우저: JPEG 프레임(바이너리), state, pong, error(JSON 텍스트).
 - 연결마다 받기 작업과 보내기 작업을 따로 돌려서, 프레임 전송이 느려도 메시지 받기가 막히지 않는다.
   WebSocket에 send하는 곳은 보내기 작업 하나뿐이다.
@@ -31,6 +31,7 @@ from server import config  # noqa: E402
 from server.control import ControlWorker  # noqa: E402
 from server.protocol import ProtocolError, hand_summary, parse_client_message  # noqa: E402
 from server.sim_worker import SimWorker  # noqa: E402
+from server.view import CameraView  # noqa: E402
 
 log = logging.getLogger(__name__)
 
@@ -129,7 +130,7 @@ def create_app(worker_factory=None) -> FastAPI:
         await websocket.accept()
         conn = Connection()
         hub.add(conn)
-        receiver = asyncio.create_task(_receive_loop(websocket, conn, hub.control))
+        receiver = asyncio.create_task(_receive_loop(websocket, conn, hub.control, hub.worker))
         sender = asyncio.create_task(_send_loop(websocket, conn, hub.worker, hub.control))
         try:
             done, _ = await asyncio.wait({receiver, sender}, return_when=asyncio.FIRST_COMPLETED)
@@ -149,7 +150,9 @@ def create_app(worker_factory=None) -> FastAPI:
     return app
 
 
-async def _receive_loop(websocket: WebSocket, conn: Connection, control: ControlWorker) -> None:
+async def _receive_loop(
+    websocket: WebSocket, conn: Connection, control: ControlWorker, worker: SimWorker
+) -> None:
     while True:
         message = await websocket.receive()
         if message["type"] == "websocket.disconnect":
@@ -171,6 +174,12 @@ async def _receive_loop(websocket: WebSocket, conn: Connection, control: Control
         elif msg["type"] == "ping":
             conn.pending_pongs.append(msg["id"])
             conn.wake.set()
+        elif msg["type"] == "height":
+            # 키보드 높이: 받은 시각과 함께 제어 스레드에 넘긴다(여러 연결이면 마지막 값이 이긴다). 계산은 제어 스레드가 한다.
+            control.submit_height(msg["dir"], msg["slow"], time.monotonic())
+        elif msg["type"] == "view":
+            # 시뮬레이션이 하나라 보기 방향도 서버에 하나뿐이다. 마지막에 받은 값이 모든 연결에 적용된다.
+            worker.set_view(CameraView(msg["azimuth"], msg["elevation"], msg["distance"]))
 
 
 async def _send_loop(websocket: WebSocket, conn: Connection, worker: SimWorker, control: ControlWorker) -> None:
@@ -205,6 +214,8 @@ def _state_message(conn: Connection, worker: SimWorker, control: ControlWorker) 
         "sim_time_s": round(worker.sim_time_s, 3),
         "frames_rendered": worker.frames_rendered,
         "control": control.state(),
+        # 지금 적용 중인 보기 방향(서버에 하나뿐, 마지막에 보낸 값)
+        "view": worker.view.as_dict(),
     }
 
 

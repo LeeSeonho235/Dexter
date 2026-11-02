@@ -20,7 +20,12 @@ import mujoco
 import numpy as np
 from PIL import Image
 
+from server.view import CameraView, apply_view, default_view, make_free_camera
+
 log = logging.getLogger(__name__)
+
+# camera 이름이 이 값이면 마우스로 돌릴 수 있는 자유 카메라(MjvCamera)로 그린다. 다른 이름은 scene.xml의 고정 카메라.
+FREE_CAMERA = "free"
 
 # 집게 끝 위치를 읽을 site 이름(server/config.py의 IK_SITE와 같다). sim_worker는 config에 의존하지 않게 상수로 둔다.
 TIP_SITE = "gripperframe"
@@ -45,9 +50,11 @@ class SimWorker:
         reflection: bool = True,
         on_frame: FrameCallback | None = None,
         tick_hz: float | None = None,
+        view: CameraView | None = None,
     ) -> None:
         """tick_hz: 물리 진행과 ctrl 반영 주기(Hz). 안 주면 frame_fps와 같다(2-1 동작).
-        화면 렌더링은 틱 N번에 한 번(N = tick_hz / frame_fps, 반올림), 화면 보는 브라우저가 있을 때만 한다."""
+        화면 렌더링은 틱 N번에 한 번(N = tick_hz / frame_fps, 반올림), 화면 보는 브라우저가 있을 때만 한다.
+        view: camera가 "free"일 때 처음 보기 방향. 안 주면 server/config.py의 기본값."""
         self._scene_path = scene_path
         self._keyframe = keyframe
         self._camera = camera
@@ -69,6 +76,9 @@ class SimWorker:
         self._latest_frame: tuple[int, bytes] | None = None
         self._ctrl: np.ndarray | None = None  # 제어 스레드가 정한 모터 목표(rad). None이면 keyframe의 ctrl 그대로
         self._snapshot: dict | None = None  # 틱마다 갱신하는 읽기 전용 값(집게 끝 위치 등)
+        self._view = view or default_view()  # 보기 방향은 하나뿐: 마지막에 set_view로 받은 값이 다음 렌더링부터 적용된다
+        self._rendered_view: CameraView | None = None  # 가장 최근 프레임을 그린 보기 방향(고정 카메라면 None)
+        self._free_camera: mujoco.MjvCamera | None = None  # 시뮬레이션 스레드에서만 만들고 쓴다
 
         self._stop = threading.Event()
         self._ready = threading.Event()
@@ -105,6 +115,28 @@ class SimWorker:
             raise ValueError("ctrl must be 6 finite numbers")
         with self._lock:
             self._ctrl = ctrl
+
+    def set_view(self, view: CameraView) -> None:
+        """자유 카메라의 보기 방향을 정한다(다음 렌더링부터). 화면 보는 브라우저가 없으면 렌더링은 여전히 안 한다."""
+        with self._lock:
+            self._view = view
+
+    @property
+    def view(self) -> CameraView:
+        """지금 정해진 보기 방향(가장 최근 set_view 값)."""
+        with self._lock:
+            return self._view
+
+    @property
+    def uses_free_camera(self) -> bool:
+        """자유 카메라로 그리는가(False면 scene.xml의 고정 카메라). 손 → 로봇 방향 계산이 이 값을 본다."""
+        return self._camera == FREE_CAMERA
+
+    @property
+    def rendered_view(self) -> CameraView | None:
+        """가장 최근에 그린 프레임에 쓴 보기 방향. 아직 안 그렸거나 고정 카메라면 None."""
+        with self._lock:
+            return self._rendered_view
 
     @property
     def snapshot(self) -> dict | None:
@@ -204,7 +236,17 @@ class SimWorker:
             self._stop.wait(max(0.0, next_tick_s - now_s))
 
     def _render_and_publish(self, renderer: mujoco.Renderer, data: mujoco.MjData) -> None:
-        renderer.update_scene(data, camera=self._camera)
+        view: CameraView | None = None
+        camera: str | mujoco.MjvCamera = self._camera
+        if self._camera == FREE_CAMERA:
+            with self._lock:
+                view = self._view
+            if self._free_camera is None:
+                self._free_camera = make_free_camera(view)
+            else:
+                apply_view(self._free_camera, view)
+            camera = self._free_camera
+        renderer.update_scene(data, camera=camera)
         # 그리기 옵션은 매번 정한다(server/config.py RENDER_SHADOW, RENDER_REFLECTION).
         renderer.scene.flags[mujoco.mjtRndFlag.mjRND_SHADOW] = self._shadow
         renderer.scene.flags[mujoco.mjtRndFlag.mjRND_REFLECTION] = self._reflection
@@ -217,6 +259,7 @@ class SimWorker:
             self._frames_rendered += 1
             seq = self._frames_rendered
             self._latest_frame = (seq, jpeg)
+            self._rendered_view = view
         if self._on_frame is not None:
             try:
                 self._on_frame(seq, jpeg)
