@@ -1,10 +1,10 @@
-# Handover
+# Dexter
 
 **브라우저에서 웹캠으로 손을 인식해 가상 로봇팔을 가르치고, 로봇이 틀리면 손으로 바로 잡아주는 시스템**
 
 *Teach a robot arm with your bare hand in the browser, and take over the moment it goes wrong.*
 
-> 이름의 뜻: 로봇에게 일을 **넘겨주고(hand over)**, 로봇이 틀리면 조종권을 다시 **손(hand)으로 넘겨받는다.**
+> 이름의 뜻: 라틴어 dexter는 "오른손"이며 dexterity(손재주)의 어원이다. 오른손으로 로봇을 가르친다.
 
 ---
 
@@ -20,7 +20,7 @@
 
 웹캠으로 로봇을 가르치는 공개 프로젝트는 이미 있다(→ [docs/02-related-work.md](docs/02-related-work.md)). 둘 다 노트북에 설치하는 프로그램이고, 흐름이 "시연 → 학습 → 끝"이다.
 
-| | 기존 프로젝트 | Handover |
+| | 기존 프로젝트 | Dexter |
 |---|---|---|
 | 사용 방법 | 노트북에 설치 | **브라우저 링크로 접속** |
 | 로봇이 실패하면 | 처음부터 시연을 더 해서 재학습 | **틀리는 순간 손을 내밀어 바로잡고, 그 순간만 학습** |
