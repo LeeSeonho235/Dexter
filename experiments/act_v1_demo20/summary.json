@@ -1,0 +1,74 @@
+{
+  "run": "act_v1_demo20",
+  "created_at": "2026-11-03T23:01:45+09:00",
+  "policy": "act",
+  "checkpoint": {
+    "path": "checkpoints/dexter_act_v1/pretrained_model",
+    "model_safetensors_sha256": "8cbc75fd6d143d266764a27ca2e28fb0f3e4f4972026ced5023ded6c42ee2c7e"
+  },
+  "seeds": [
+    1000,
+    1049
+  ],
+  "n_requested": 50,
+  "eval": {
+    "max_s": 45.0,
+    "settle_s": 1.0,
+    "start_pose": "home",
+    "fps": 30,
+    "limit_step": false,
+    "limit_step_arm_rad": 0.25,
+    "limit_step_gripper_rad": 0.72,
+    "render_only_when_needed": true,
+    "max_s_chosen_after_demos": true,
+    "failure_thresholds": {
+      "lift_z_min_m": 0.03,
+      "pushed_xy_m": 0.02,
+      "near_target_m": 0.06
+    }
+  },
+  "act": {
+    "n_action_steps": 100,
+    "temporal_ensemble": false
+  },
+  "server_config_sha256": "44d0f842809d08ac15d4cf849a01291d163bd6e1920cd94fc948056571ea1057",
+  "versions": {
+    "mujoco": "3.16.0",
+    "numpy": "2.2.6",
+    "python": "3.12.3",
+    "git_head": "6cd7eea"
+  },
+  "wall_s": 79.1,
+  "summary": {
+    "n": 50,
+    "successes": 29,
+    "success_rate": 0.58,
+    "wilson95": [
+      0.4423,
+      0.7063
+    ],
+    "time_to_success_s": {
+      "min": 10.6,
+      "p25": 13.135,
+      "median": 16.435,
+      "p75": 22.735,
+      "max": 39.1
+    },
+    "failure_counts": {
+      "grasp_fail": 20,
+      "timeout": 0,
+      "target_miss": 0,
+      "dropped": 1,
+      "other": 0
+    },
+    "grasp_fail_pushed": 15,
+    "limited_sample_fraction": 0.0,
+    "timing_s": {
+      "render_total": 26.378,
+      "policy_total": 40.219,
+      "physics_total": 6.911,
+      "policy_calls": 473,
+      "samples": 45331
+    }
+  }
+}
