@@ -1,0 +1,70 @@
+{
+  "run": "replay_baseline",
+  "kind": "open_loop_replay_baseline",
+  "start": "home",
+  "boundary": "grid",
+  "seeds": "시연 시드(0~99)의 블록 위치. 평가 시드(1000~1049)와 다르다",
+  "demo_seeds": [
+    1,
+    2,
+    3,
+    4,
+    6,
+    7,
+    8,
+    9,
+    11,
+    12,
+    14,
+    17,
+    18,
+    19,
+    21,
+    22,
+    23,
+    24,
+    25,
+    27
+  ],
+  "note": "시연의 ctrl을 그대로 재생한 열린 고리 기준선. 접촉에 민감해서 합격선이 아니라 학습 정책 성공률과 나란히 보고하는 기준선이다.",
+  "created_at": "2026-11-03T21:12:12+09:00",
+  "versions": {
+    "mujoco": "3.16.0",
+    "numpy": "2.5.4"
+  },
+  "summary": {
+    "block_diff_at_demo_success_mm": {
+      "min": 0.297,
+      "p25": 3.092,
+      "median": 14.443,
+      "p75": 42.038,
+      "max": 194.325
+    },
+    "n": 20,
+    "replay_successes": 12,
+    "final_block_diff_mm": {
+      "min": 0.297,
+      "p25": 3.092,
+      "median": 16.423,
+      "p75": 68.942,
+      "max": 194.325
+    },
+    "n_block_diff_within_10mm": 8,
+    "arm_rms_rad": {
+      "min": 0.01,
+      "p25": 0.016,
+      "median": 0.028,
+      "p75": 0.069,
+      "max": 0.165
+    },
+    "failure_counts": {
+      "success": 12,
+      "grasp_fail": 8,
+      "timeout": 0,
+      "target_miss": 0,
+      "dropped": 0,
+      "other": 0
+    },
+    "trusted": false
+  }
+}

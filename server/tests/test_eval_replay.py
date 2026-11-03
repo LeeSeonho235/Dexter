@@ -16,7 +16,8 @@ HAVE_RAW = (config.RECORD_DIR / "episode_000019.npz").exists()
 
 
 def fake_row(success=True, diff=3.0):
-    return {"replay_success": success, "final_block_diff_mm": diff, "block_diff_at_demo_success_mm": diff, "arm_rms_rad": 0.01}
+    return {"replay_success": success, "final_block_diff_mm": diff, "block_diff_at_demo_success_mm": diff, "arm_rms_rad": 0.01,
+            "failure": "success" if success else "grasp_fail"}
 
 
 def test_trust_rule_needs_15_successes_and_block_diff_within_1cm():
