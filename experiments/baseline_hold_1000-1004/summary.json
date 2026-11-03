@@ -1,0 +1,62 @@
+{
+  "run": "baseline_hold_1000-1004",
+  "created_at": "2026-11-03T21:01:07+09:00",
+  "policy": "hold",
+  "checkpoint": null,
+  "seeds": [
+    1000,
+    1004
+  ],
+  "n_requested": 5,
+  "eval": {
+    "max_s": 45.0,
+    "settle_s": 1.0,
+    "start_pose": "home",
+    "fps": 30,
+    "limit_step": false,
+    "limit_step_arm_rad": 0.25,
+    "limit_step_gripper_rad": 0.72,
+    "render_only_when_needed": true,
+    "max_s_chosen_after_demos": true,
+    "failure_thresholds": {
+      "lift_z_min_m": 0.03,
+      "pushed_xy_m": 0.02,
+      "near_target_m": 0.06
+    }
+  },
+  "act": null,
+  "server_config_sha256": "44d0f842809d08ac15d4cf849a01291d163bd6e1920cd94fc948056571ea1057",
+  "versions": {
+    "mujoco": "3.16.0",
+    "numpy": "2.2.6",
+    "python": "3.12.3",
+    "git_head": "717a809"
+  },
+  "wall_s": 1.1,
+  "summary": {
+    "n": 5,
+    "successes": 0,
+    "success_rate": 0.0,
+    "wilson95": [
+      0.0,
+      0.4345
+    ],
+    "time_to_success_s": null,
+    "failure_counts": {
+      "grasp_fail": 5,
+      "timeout": 0,
+      "target_miss": 0,
+      "dropped": 0,
+      "other": 0
+    },
+    "grasp_fail_pushed": 0,
+    "limited_sample_fraction": 0.0,
+    "timing_s": {
+      "render_total": 0.008,
+      "policy_total": 0.004,
+      "physics_total": 0.385,
+      "policy_calls": 0,
+      "samples": 6755
+    }
+  }
+}

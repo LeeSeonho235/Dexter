@@ -1,0 +1,6 @@
+seed,success,failure,pushed,time_to_success_s,sim_s,n_samples,block_start_x_m,block_start_y_m,final_block_x_m,final_block_y_m,final_block_z_m,final_gripper_rad,max_block_z_m,max_block_move_m,limited_samples,policy_calls,render_s,policy_s,physics_s
+1000,False,grasp_fail,False,,45.0,1351,0.221283,-0.015462,0.224867,-0.018481,0.014892,0.653271,0.024259,0.01718,0,14,0.774542,1.19326,0.105871
+1001,False,grasp_fail,False,,45.0,1351,0.226756,-0.097802,0.226756,-0.097802,0.014892,0.652745,0.014892,0.0,0,14,0.75723,1.329801,0.10367
+1002,False,grasp_fail,False,,45.0,1351,0.212849,-0.049993,0.212849,-0.049993,0.014892,0.633174,0.014892,0.0,0,14,0.761373,1.181487,0.104363
+1003,False,grasp_fail,False,,45.0,1351,0.201265,-0.064061,0.201265,-0.064061,0.014892,0.663866,0.014892,0.0,0,14,0.757656,1.180588,0.104285
+1004,False,grasp_fail,False,,45.0,1351,0.190053,-0.081779,0.190053,-0.081779,0.014892,0.653863,0.014892,0.0,0,14,0.750846,1.180534,0.10424

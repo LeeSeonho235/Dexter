@@ -70,11 +70,34 @@ def make_raw_and_frames(root: Path) -> tuple[Path, Path]:
     return raw, frames
 
 
-def build_small(tmp_path: Path, exclude: set[int] = frozenset()):
+def build_small(tmp_path: Path, exclude: set[int] = frozenset(), **kwargs):
     raw, frames = make_raw_and_frames(tmp_path)
     out = tmp_path / "ds"
-    result = bd.build(raw, frames, out, set(exclude), crf=cfg.VIDEO_CRF)
+    result = bd.build(raw, frames, out, set(exclude), crf=cfg.VIDEO_CRF, **kwargs)
     return raw, frames, out, result
+
+
+def test_image_mode_stores_png_images_not_videos_and_still_matches_exactly(tmp_path):
+    """Colab에서 영상 디코딩이 안 될 때의 대안(--image-mode): 영상 파일 없이 이미지로 저장되고 state/action 대응은 그대로다."""
+    raw, frames, out, result = build_small(tmp_path, image_mode=True)
+    assert result["episodes"] == [0, 2]
+    assert not (out / "videos").exists() or not any((out / "videos").rglob("*.mp4"))
+    # v3.0 이미지 모드는 PNG 파일을 남기지 않고 이미지를 data/ parquet 안에 담는다(실측: 64x64 31프레임에서 data/ 24 KB)
+    assert not any((out / "images").rglob("*.png")) and (out / "data" / "chunk-000" / "file-000.parquet").stat().st_size > 5000
+    ds = vd.load_dataset(out)
+    assert ds.meta.features[cfg.IMAGE_KEY]["dtype"] == "image"
+    assert vd.check_state_action(ds, raw, [0, 2]) == []
+    ok = vd.check_images(ds, frames, [0, 2], per_episode=6)
+    assert ok["problems"] == [] and ok["frames_checked"] >= 8
+    assert max(ok["mae_all"]) < 0.01  # PNG 무손실이라 사실상 0
+
+
+def test_h264_codec_option_builds_and_matches(tmp_path):
+    raw, frames, out, _ = build_small(tmp_path, codec="h264")
+    ds = vd.load_dataset(out)
+    assert ds.meta.features[cfg.IMAGE_KEY]["info"]["video.codec"] == "h264"
+    assert vd.check_state_action(ds, raw, [0, 2]) == []
+    assert vd.check_images(ds, frames, [0, 2], per_episode=6)["problems"] == []
 
 
 def test_only_successes_are_in_the_dataset_and_state_action_match_exactly(tmp_path):

@@ -41,12 +41,12 @@ def frame_file(frames_dir: Path, index: int, k: int) -> Path:
     return Path(frames_dir) / f"ep_{index:06d}" / FRAME_FILE.format(k=k)
 
 
-def make_features(height_px: int, width_px: int) -> dict:
+def make_features(height_px: int, width_px: int, image_mode: bool = False) -> dict:
     names = list(cfg.JOINT_NAMES)
     return {
         "observation.state": {"dtype": "float32", "shape": (cfg.N_JOINTS,), "names": names},
         "action": {"dtype": "float32", "shape": (cfg.N_JOINTS,), "names": names},
-        cfg.IMAGE_KEY: {"dtype": "video", "shape": (height_px, width_px, 3), "names": ["height", "width", "channels"]},
+        cfg.IMAGE_KEY: {"dtype": "image" if image_mode else "video", "shape": (height_px, width_px, 3), "names": ["height", "width", "channels"]},
     }
 
 
@@ -90,7 +90,18 @@ def check_frames(raw_dir: Path, frames_dir: Path, metas_by_index: dict[int, dict
     return problems
 
 
-def build(raw_dir: Path, frames_dir: Path, out_root: Path, exclude: set[int], crf: int) -> dict:
+def build(
+    raw_dir: Path,
+    frames_dir: Path,
+    out_root: Path,
+    exclude: set[int],
+    crf: int,
+    *,
+    image_mode: bool = False,
+    codec: str | None = None,
+) -> dict:
+    """image_mode=True면 영상 대신 PNG 이미지로 저장한다(Colab에서 AV1 4:4:4 디코딩이 안 될 때의 대안, 용량 약 540 MB).
+    codec은 영상 코덱(기본 설정의 libaom-av1). 다른 코덱의 예: "h264"(yuv444p, 더 널리 디코딩됨, 실측 블록 오차 4.4)."""
     from lerobot.configs.video import RGBEncoderConfig
     from lerobot.datasets import LeRobotDataset
 
@@ -107,12 +118,17 @@ def build(raw_dir: Path, frames_dir: Path, out_root: Path, exclude: set[int], cr
         raise SystemExit(f"{out_root} 가 이미 있습니다. 덮어쓰지 않습니다. 다른 --out을 쓰거나 직접 지우세요")
 
     settings = json.loads((Path(frames_dir) / "manifest.json").read_text(encoding="utf-8"))["settings"]
-    features = make_features(settings["height_px"], settings["width_px"])
-    encoder = RGBEncoderConfig(
-        vcodec=cfg.VIDEO_CODEC, pix_fmt=cfg.VIDEO_PIX_FMT, crf=crf, g=cfg.VIDEO_GOP, extra_options=dict(cfg.VIDEO_EXTRA_OPTIONS)
-    )
+    features = make_features(settings["height_px"], settings["width_px"], image_mode)
+    encoder = None
+    if not image_mode:
+        vcodec = codec or cfg.VIDEO_CODEC
+        # libsvtav1은 yuv444p를 열지 못한다(3-3 실측). 코덱 전용 옵션(cpu-used 등)은 기본 코덱일 때만 쓴다.
+        pix_fmt = "yuv420p" if vcodec == "libsvtav1" else cfg.VIDEO_PIX_FMT
+        extra = dict(cfg.VIDEO_EXTRA_OPTIONS) if vcodec == cfg.VIDEO_CODEC else {"threads": cfg.VIDEO_EXTRA_OPTIONS.get("threads", "2")}
+        encoder = RGBEncoderConfig(vcodec=vcodec, pix_fmt=pix_fmt, crf=crf, g=cfg.VIDEO_GOP, extra_options=extra)
     ds = LeRobotDataset.create(
-        repo_id=cfg.REPO_ID, fps=cfg.FPS, features=features, root=out_root, robot_type=cfg.ROBOT_TYPE, use_videos=True, rgb_encoder=encoder
+        repo_id=cfg.REPO_ID, fps=cfg.FPS, features=features, root=out_root, robot_type=cfg.ROBOT_TYPE,
+        use_videos=not image_mode, rgb_encoder=encoder,
     )
     start = time.perf_counter()
     total = sum(metas_by_index[i]["n_ticks"] for i in indices)
@@ -142,13 +158,15 @@ def main() -> None:
     parser.add_argument("--out", type=Path, default=cfg.DATASET_ROOT)
     parser.add_argument("--exclude", default="", help="실패 말고 추가로 뺄 에피소드 번호(쉼표). 기본은 성공 전부 포함")
     parser.add_argument("--crf", type=int, default=cfg.VIDEO_CRF, help="AV1 화질(낮을수록 좋고 큼)")
+    parser.add_argument("--image-mode", action="store_true", help="영상 대신 PNG 이미지로 저장(Colab에서 영상 디코딩이 안 될 때의 대안, 약 540 MB)")
+    parser.add_argument("--codec", choices=["libaom-av1", "h264", "hevc", "libsvtav1"], help=f"영상 코덱(기본 {cfg.VIDEO_CODEC})")
     args = parser.parse_args()
     try:
         os.nice(NICE_LEVEL)
     except OSError as err:
         print(f"nice 설정 실패(계속 진행): {err}", file=sys.stderr)
     exclude = {int(x) for x in args.exclude.split(",") if x.strip()}
-    result = build(args.raw, args.frames, args.out, exclude, args.crf)
+    result = build(args.raw, args.frames, args.out, exclude, args.crf, image_mode=args.image_mode, codec=args.codec)
     print(f"완료: 에피소드 {len(result['episodes'])}개 {result['episodes']}, 프레임 {result['frames']}, {result['seconds']:.0f}s")
     print(f"데이터셋 크기: {dir_size_bytes(args.out) / 1e6:.1f} MB ({args.out})")
 

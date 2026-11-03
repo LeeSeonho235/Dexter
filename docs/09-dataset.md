@@ -114,7 +114,11 @@ train/.venv/bin/python -I train/encode_mp4.py dataset --root data/lerobot/dexter
 | libx265 yuv444p | 1.46 MB | 4.10 / 15.3 | 1.9 s |
 
 선택: **libaom-av1, yuv444p, crf 18, g 2, cpu-used 8, 스레드 2.** 전체 데이터셋을 이 설정으로 만든 결과(아래 "검증 결과")의 블록 오차는 평균 2.10(최대 3.93), 전체 평균 0.86이다.
-이 4:4:4 AV1 영상이 **Colab(torchcodec 또는 pyav)에서 잘 디코딩되는지는 확인하지 못했다.** 이 서버에서는 pyav로 학습까지 돌았다. 안 되면 `use_videos=False`(PNG 이미지 저장, 데이터셋이 수백 MB)가 대안이다.
+이 4:4:4 AV1 영상이 **Colab(torchcodec 또는 pyav)에서 잘 디코딩되는지는 확인하지 못했다.** 이 서버에서는 pyav로 학습까지 돌았다. Colab 노트북(`docs/10-colab.md`)의 5번 셀이 처음 확인한다.
+안 되면 `build_dataset.py`의 옵션으로 다시 만든다(3-4에서 추가, 둘 다 테스트와 검증을 통과했다):
+
+- `--image-mode`: 영상 대신 이미지를 parquet 안에 저장(v3.0은 PNG 파일을 남기지 않는다). **505.9 MB**(실측, 임시 폴더에 전체를 만들어 `verify_dataset.py`로 검증 후 지움). 무손실(이미지 오차 0), 만드는 데 127초.
+- `--codec h264`: H.264 4:4:4. 에피소드 21 실측 기준 용량은 AV1 4:4:4의 1.12배(전체 약 79 MB, **추정**), 블록 색 오차 평균 4.4(AV1 4:4:4는 2.1).
 
 ## 디스크 사용량 (실측)
 
@@ -203,7 +207,8 @@ export OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 HF_HUB_DISABLE_TELEMETRY=1 HF_HUB_OFF
 
 ```bash
 cd ~/handover
-tar cf /tmp/dexter_pick_place_v1.tar -C data/lerobot dexter_pick_place_v1     # 71.1 MB. 영상이 이미 압축돼 gzip(61.5 MB)과 큰 차이 없음
+mkdir -p tmp && tar cf tmp/dexter_dataset_v1.tar -C data/lerobot dexter_pick_place_v1     # 71.1 MB. 영상이 이미 압축돼 gzip(61.5 MB)과 큰 차이 없음. tmp/는 git에 안 올라가고 VS Code 탐색기에서 내려받을 수 있다
+# 자세한 단계(Drive 올리기, 노트북 실행, 체크포인트 가져오기)는 docs/10-colab.md
 ```
 
 **2) 올리는 방법 비교**
@@ -223,7 +228,7 @@ from google.colab import drive
 drive.mount('/content/drive')
 ```
 ```bash
-mkdir -p /content/data && tar xf /content/drive/MyDrive/dexter_pick_place_v1.tar -C /content/data
+mkdir -p /content/data && tar xf /content/drive/MyDrive/dexter/dexter_dataset_v1.tar -C /content/data
 pip install "lerobot[training]==0.6.1"      # 07 문서 10절. Python 3.12 이상 필요
 lerobot-train --dataset.repo_id=local/dexter_pick_place_v1 --dataset.root=/content/data/dexter_pick_place_v1 \
   --policy.type=act --policy.device=cuda --policy.push_to_hub=false \
@@ -246,7 +251,7 @@ train/.venv/bin/hf upload <사용자>/dexter_pick_place_v1 data/lerobot/dexter_p
 
 - 4단계용 컬럼(seed, is_intervention, source)은 **이번 데이터셋에 넣지 않았다.** 넣는 방법의 확인 결과는 `docs/07-lerobot-notes.md` 4절(프레임 단위 feature는 가능, 에피소드 메타 API는 못 찾음). 에피소드 ↔ 시드 대응은 `data/frames/manifest.json`에 있다.
 - 렌더러 인스턴스의 **첫 렌더링만** 이후 렌더링과 몇 픽셀(7/76,800)이 1단계(0~255) 다르다(실측, 깊은 원인 미확인). 렌더링을 한 번에 돌렸으므로 `data/frames`에서는 첫 프레임(raw 1번 k=0)만 해당할 것으로 보인다(다른 프레임과 비교해 보지는 않았다). 테스트는 최대 오차 1까지 허용한다.
-- 4:4:4 AV1이 Colab 디코더에서 되는지 미확인(위 참고).
+- 4:4:4 AV1이 Colab 디코더에서 되는지 미확인(위 참고. 안 될 때의 대안 `--image-mode`, `--codec h264`는 3-4에서 추가).
 - 시연 20개로 ACT가 학습되는지, 해상도 240×320과 카메라 1개로 충분한지, 정지 구간이 학습을 해치는지 모른다.
 - `train/.venv`에 pytest가 없어 `train/tests`는 pytest로 돌리지 못했다. 같은 함수를 `tmp_path` 대신 임시 폴더로 직접 호출해서 8개 모두 통과를 확인했다. pytest 설치 여부는 사용자가 정한다.
 - 기존 테스트 2개가 실패한다(이번 작업과 무관, 고치지 않음): `server/tests/test_control_relative.py::test_app_default_mapper_follows_the_config_mode`, `server/tests/test_mapping_relative.py::test_defaults_modes`. 둘 다 `config.MAPPING_MODE == "relative"`를 기대하는데 작업 트리의 `server/config.py`는 `"absolute"`다(HEAD는 `"relative"`, git diff로 확인).
