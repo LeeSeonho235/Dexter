@@ -55,6 +55,22 @@ from server.eval_env import EvalEnv, HoldPolicy, Observation, rollout  # noqa: E
 from server.eval_metrics import write_results  # noqa: E402
 
 
+def device_overrides(checkpoint: Path, device: str) -> tuple[dict, dict]:
+    """저장된 processor json의 device_processor 설정(Colab에서 학습하면 'cuda')을 평가 장치로 덮어쓰는 override (전처리, 후처리).
+
+    lerobot 0.6.1: make_pre_post_processors(**kwargs)의 preprocessor_overrides / postprocessor_overrides(policies/factory.py:190-191, 205, 215)는
+    {step의 registry_name: {생성자 인자: 값}} 형식이다(processor/pipeline.py:1016-1026). 저장된 json 파일은 고치지 않는다.
+    쓰이지 않은 키는 오류가 나므로(pipeline.py _validate_overrides_used) json에 device_processor가 있을 때만 넣는다.
+    """
+    out = []
+    for filename in ("policy_preprocessor.json", "policy_postprocessor.json"):
+        path = Path(checkpoint) / filename
+        steps = json.loads(path.read_text(encoding="utf-8")).get("steps", []) if path.is_file() else []
+        has_device_step = any(s.get("registry_name") == "device_processor" for s in steps)
+        out.append({"device_processor": {"device": device}} if has_device_step else {})
+    return out[0], out[1]
+
+
 class ActPolicy:
     """lerobot ACTPolicy 어댑터. predict_action(전처리 → select_action → 후처리)을 부른다."""
 
@@ -71,7 +87,10 @@ class ActPolicy:
         self.policy = ACTPolicy.from_pretrained(str(checkpoint))
         self.policy.to(self.device)
         self.policy.eval()
-        self.pre, self.post = make_pre_post_processors(self.policy.config, pretrained_path=str(checkpoint))
+        pre_overrides, post_overrides = device_overrides(checkpoint, device)
+        self.pre, self.post = make_pre_post_processors(
+            self.policy.config, pretrained_path=str(checkpoint), preprocessor_overrides=pre_overrides, postprocessor_overrides=post_overrides
+        )
         cfg = self.policy.config
         if dcfg.IMAGE_KEY not in cfg.image_features:
             raise SystemExit(f"체크포인트의 이미지 입력 {list(cfg.image_features)} 에 {dcfg.IMAGE_KEY} 가 없습니다")

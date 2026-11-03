@@ -130,6 +130,7 @@ Drive 폴더 구성: `dexter/dexter_dataset_v1.tar`, `dexter/checkpoints/last/`(
 ```
 
 서버에서는 `checkpoints/dexter_act_v1/pretrained_model`을 쓴다: `--checkpoint checkpoints/dexter_act_v1/pretrained_model`.
+Colab(GPU)에서 학습한 체크포인트는 `policy_preprocessor.json`에 `device: cuda`가 저장되는데, `train/evaluate.py`가 이를 `--device`(기본 cpu)로 덮어써서 열기 때문에 GPU 없는 서버에서도 열린다(json 파일은 수정하지 않는다). 직접 `make_pre_post_processors`로 열 때는 `preprocessor_overrides={"device_processor": {"device": "cpu"}}`가 필요하다.
 정규화 통계가 체크포인트 안에 들어 있어서 평가는 데이터셋 없이 돈다. 단, 데이터셋을 다시 만들면(stats가 달라짐) 이전 체크포인트와 짝이 맞지 않는다.
 
 ## 디코딩이 안 될 때 (13번 셀 실패)
