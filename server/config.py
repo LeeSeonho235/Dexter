@@ -192,3 +192,56 @@ MAX_GRIPPER_STEP_RAD = 0.25
 STATS_WINDOW_SAMPLES = 300
 JITTER_WINDOW_S = 1.0
 JITTER_MIN_SAMPLES = 5
+
+# --- 시연 녹화 (3-2) ---
+# 저장 위치: 저장소 밖으로 나가지 않는 data/raw/ (.gitignore의 data/). 폴더는 첫 저장 때 만든다.
+RECORD_DIR = REPO_ROOT / "data" / "raw"
+RECORD_FORMAT_VERSION = 1
+RECORD_SOURCE = "demo"
+# 샘플 주파수(Hz)와 에피소드 최대 길이(s). 넘으면 실패로 자동 종료하고 저장한다.
+# 샘플은 시뮬레이션 시간 격자 t0 + k/RECORD_FPS에서 찍는다(server/grid.py). 모델 timestep이 0.005 s라서
+# 실제 간격은 30 ms와 35 ms가 번갈아 나오고 격자와의 차이는 최대 2.5 ms다. 평가(3-4)도 같은 격자로 돌려야 한다.
+RECORD_FPS = 30
+RECORD_MAX_S = 60.0
+# 정지 구간: 이웃한 두 샘플 사이에 ctrl 6개 중 가장 크게 바뀐 값(rad)이 이보다 작으면 "정지"로 센다(약 0.06 rad/s 미만).
+STILL_CTRL_DELTA_RAD = 0.002
+
+# 학습·재생용 카메라: 마우스로 돌리는 화면(VIEW_*)과 별개이고, 녹화 중 화면을 돌려도 바뀌지 않는다(3-3에서 이 값으로 다시 그린다).
+# 방위각/고도각/거리 규칙은 위 "자유 카메라 보기 방향"과 같다. 그림자·반사는 위 RENDER_SHADOW, RENDER_REFLECTION을 그대로 쓴다.
+RECORD_CAMERA_AZIMUTH_DEG = 110.0
+RECORD_CAMERA_ELEVATION_DEG = -35.0
+RECORD_CAMERA_DISTANCE_M = 0.8
+RECORD_CAMERA_LOOKAT_M = VIEW_LOOKAT_M
+RECORD_IMAGE_HEIGHT_PX = 240
+RECORD_IMAGE_WIDTH_PX = 320
+
+# 블록 시작 위치(시드) 영역(m). 블록은 바닥 위(z = BLOCK_HALF_M)에 방향 없이(회전 0) 놓는다. 목표(초록)는 고정.
+# server/spawn_check.py로 IK 도달성을 확인해서 정했다(결과는 docs/08-recording.md).
+BLOCK_HALF_M = 0.015
+BLOCK_SPAWN_X_M = (0.19, 0.25)
+BLOCK_SPAWN_Y_M = (-0.10, 0.04)
+# 시드 범위 [시작, 끝): 시연 0~99, 평가 1000~1049. 겹치면 안 된다(server/tests/test_seeds.py가 확인).
+DEMO_SEED_RANGE = (0, 100)
+EVAL_SEED_RANGE = (1000, 1050)
+# 목표(초록 사각형): sim/scene.xml의 geom "target"과 같아야 한다(server/tests/test_success.py가 확인). 중심 x, y(m), 반변(m).
+TARGET_CENTER_M = (0.20, 0.12)
+TARGET_HALF_M = 0.025
+
+# 성공 판정(server/success.py). 아래 조건이 SUCCESS_HOLD_S(시뮬레이션 시간) 이상 계속 맞으면 성공.
+SUCCESS_XY_MARGIN_M = 0.005  # 블록 중심이 목표 반변 + 이 값 안쪽(경계 포함)
+SUCCESS_BLOCK_Z_MAX_M = 0.02  # 블록 중심 높이가 이보다 낮음(바닥에 놓임. 바닥 위 중심은 0.015)
+SUCCESS_GRIPPER_OPEN_MIN_RAD = 0.5  # 집게 실제 각도가 이 이상이면 "열림"(열림 목표 0.9, 닫힘 목표 -0.1)
+SUCCESS_HOLD_S = 0.5
+
+# 블록 리셋(server/reset.py): 팔을 home 자세(집게 열림)로 올린 뒤 블록을 시드 위치에 놓는다.
+RESET_PARK_TOLERANCE_RAD = 0.05  # 모든 관절이 목표에서 이 안쪽이어야 도착
+RESET_PARK_HOLD_S = 0.2  # 도착 상태를 이 시간 유지해야 블록을 놓는다
+RESET_TIMEOUT_S = 4.0  # 이 시간 안에 못 올라가면 블록을 건드리지 않고 중단
+RESET_SETTLE_S = 0.3  # 블록을 놓은 뒤 가라앉기를 기다리는 시간
+RESET_BLOCK_TOLERANCE_M = 0.003  # 놓은 뒤 블록이 시드 위치(xy)와 바닥 높이에서 벗어난 허용값
+# 녹화 시작 때 블록이 시드 위치에서 이만큼(m) 넘게 벗어나 있으면 거부한다(리셋 뒤 건드린 경우).
+RECORD_START_BLOCK_TOLERANCE_M = 0.01
+
+# 틱 간격 통계(최근 N개). 공칭 주기는 1/SIM_TICK_HZ(33.3 ms)라서 33 ms 한 기준만 쓰면 절반이 걸린다.
+TICK_STATS_WINDOW = 300
+TICK_OVER_MS = (33.3, 40.0, 50.0)

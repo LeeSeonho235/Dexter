@@ -402,3 +402,77 @@ button {
   background: #c62828;
   border-radius: 4px;
 }
+
+/* 녹화 상자 (3-2) */
+.record-panel {
+  max-width: 880px;
+}
+
+.record-title {
+  font-size: 16px;
+  margin: 0 0 6px;
+}
+
+.record-status {
+  margin: 4px 0 8px;
+  font-weight: 700;
+}
+
+.record-status.recording {
+  color: #d03030;
+}
+
+.record-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.record-button {
+  margin-bottom: 0;
+}
+
+.record-start,
+.record-success {
+  border-color: #1a9c3c;
+}
+
+.record-fail {
+  border-color: #d03030;
+}
+
+.record-delete.armed {
+  color: #fff;
+  background: #c62828;
+}
+
+.record-flag,
+.record-event {
+  margin: 6px 0;
+  padding: 6px 10px;
+  font-size: 14px;
+  border-radius: 4px;
+}
+
+.record-flag.success {
+  font-weight: 700;
+  color: #fff;
+  background: #1a9c3c;
+}
+
+.record-flag.warn,
+.record-event.warn {
+  color: #222;
+  background: #ffd54f;
+}
+
+.record-event.info {
+  background: #8882;
+}
+
+.record-event.error {
+  font-weight: 700;
+  color: #fff;
+  background: #c62828;
+}

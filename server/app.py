@@ -4,8 +4,9 @@
     cd ~/handover && MUJOCO_GL=egl server/.venv/bin/python -m server.app
 
 - 127.0.0.1:PORT(server/config.py)에서만 연다. 브라우저는 Vite 프록시 '/ws'로 붙는다.
-- 브라우저 → 서버: hand(숫자만), ping, view(보기 방향), height(키보드 높이). 바이너리(영상·이미지)는 받지 않는다.
-- 서버 → 브라우저: JPEG 프레임(바이너리), state, pong, error(JSON 텍스트).
+- 브라우저 → 서버: hand(숫자만), ping, view(보기 방향), height(키보드 높이), record(녹화 명령), reset(블록 리셋).
+  바이너리(영상·이미지)는 받지 않는다.
+- 서버 → 브라우저: JPEG 프레임(바이너리), state(녹화 상태는 state.record), pong, error(JSON 텍스트).
 - 연결마다 받기 작업과 보내기 작업을 따로 돌려서, 프레임 전송이 느려도 메시지 받기가 막히지 않는다.
   WebSocket에 send하는 곳은 보내기 작업 하나뿐이다.
 - 받은 hand는 제어 스레드(server/control.py)에 "최신 한 개"로 넘기기만 한다. 매핑과 역기구학 계산은 거기서 하므로
@@ -29,7 +30,9 @@ from fastapi import FastAPI, WebSocket  # noqa: E402
 
 from server import config  # noqa: E402
 from server.control import ControlWorker  # noqa: E402
+from server.episode_store import EpisodeStore  # noqa: E402
 from server.protocol import ProtocolError, hand_summary, parse_client_message  # noqa: E402
+from server.recording import RecordingService  # noqa: E402
 from server.sim_worker import SimWorker  # noqa: E402
 from server.view import CameraView  # noqa: E402
 
@@ -52,10 +55,17 @@ class Connection:
 class Hub:
     """연결 목록과 시뮬레이션 스레드를 잇는다."""
 
-    def __init__(self, worker: SimWorker, loop: asyncio.AbstractEventLoop, control: ControlWorker) -> None:
+    def __init__(
+        self,
+        worker: SimWorker,
+        loop: asyncio.AbstractEventLoop,
+        control: ControlWorker,
+        recording: RecordingService | None = None,
+    ) -> None:
         self.worker = worker
         self.loop = loop
         self.control = control
+        self.recording = recording
         self.connections: set[Connection] = set()
 
     def add(self, conn: Connection) -> None:
@@ -79,8 +89,10 @@ class Hub:
             conn.wake.set()
 
 
-def create_app(worker_factory=None) -> FastAPI:
-    """worker_factory(on_frame) -> SimWorker. 테스트에서 바꿔 끼울 수 있게 둔다."""
+def create_app(worker_factory=None, *, record_dir=None, record_max_s=None, record_store=None) -> FastAPI:
+    """worker_factory(on_frame) -> SimWorker. 테스트에서 바꿔 끼울 수 있게 둔다.
+    record_dir: 에피소드 저장 폴더(기본 config.RECORD_DIR). record_max_s: 최대 길이(기본 config.RECORD_MAX_S).
+    record_store: 저장소 자체를 바꿔 끼울 때(테스트에서 쓰기 실패를 흉내 낼 때)."""
 
     def default_factory(on_frame):
         return SimWorker(
@@ -111,14 +123,21 @@ def create_app(worker_factory=None) -> FastAPI:
         # Renderer 생성(수백 ms)과 IK 모델 읽기가 루프를 막지 않게 스레드에서 기다린다.
         await asyncio.to_thread(worker.start)
         await asyncio.to_thread(control.start)
+        # 녹화 서비스: 저장된 에피소드 목록을 읽는다(폴더가 없으면 빈 목록. 폴더는 첫 저장 때 만든다).
+        store = record_store or EpisodeStore(record_dir)
+        kwargs = {} if record_max_s is None else {"max_s": record_max_s}
+        recording = await asyncio.to_thread(lambda: RecordingService(worker, control, store=store, **kwargs))
+        recording.start()
+        hub.recording = recording
         app.state.hub = hub
         log.info(
-            "sim worker started (camera=%s, %d fps, tick %d Hz), control %d Hz",
-            config.CAMERA, config.FRAME_FPS, config.SIM_TICK_HZ, config.CONTROL_HZ,
+            "sim worker started (camera=%s, %d fps, tick %d Hz), control %d Hz, recording dir %s",
+            config.CAMERA, config.FRAME_FPS, config.SIM_TICK_HZ, config.CONTROL_HZ, store.root,
         )
         try:
             yield
         finally:
+            await asyncio.to_thread(recording.close)
             await asyncio.to_thread(control.stop)
             await asyncio.to_thread(worker.stop)
 
@@ -130,8 +149,8 @@ def create_app(worker_factory=None) -> FastAPI:
         await websocket.accept()
         conn = Connection()
         hub.add(conn)
-        receiver = asyncio.create_task(_receive_loop(websocket, conn, hub.control, hub.worker))
-        sender = asyncio.create_task(_send_loop(websocket, conn, hub.worker, hub.control))
+        receiver = asyncio.create_task(_receive_loop(websocket, conn, hub.control, hub.worker, hub.recording))
+        sender = asyncio.create_task(_send_loop(websocket, conn, hub.worker, hub.control, hub.recording))
         try:
             done, _ = await asyncio.wait({receiver, sender}, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
@@ -151,7 +170,11 @@ def create_app(worker_factory=None) -> FastAPI:
 
 
 async def _receive_loop(
-    websocket: WebSocket, conn: Connection, control: ControlWorker, worker: SimWorker
+    websocket: WebSocket,
+    conn: Connection,
+    control: ControlWorker,
+    worker: SimWorker,
+    recording: RecordingService | None = None,
 ) -> None:
     while True:
         message = await websocket.receive()
@@ -180,9 +203,21 @@ async def _receive_loop(
         elif msg["type"] == "view":
             # 시뮬레이션이 하나라 보기 방향도 서버에 하나뿐이다. 마지막에 받은 값이 모든 연결에 적용된다.
             worker.set_view(CameraView(msg["azimuth"], msg["elevation"], msg["distance"]))
+        elif msg["type"] in ("record", "reset") and recording is not None:
+            # 형식은 맞지만 지금은 할 수 없는 요청(녹화 중 리셋 등)은 이유를 error로 돌려보낸다. 잘못된 메시지(invalid_count)는 아니다.
+            refusal = recording.handle_reset() if msg["type"] == "reset" else recording.handle_record(msg)
+            if refusal is not None:
+                conn.pending_error = refusal
+                conn.wake.set()
 
 
-async def _send_loop(websocket: WebSocket, conn: Connection, worker: SimWorker, control: ControlWorker) -> None:
+async def _send_loop(
+    websocket: WebSocket,
+    conn: Connection,
+    worker: SimWorker,
+    control: ControlWorker,
+    recording: RecordingService | None = None,
+) -> None:
     next_state_s = time.monotonic()
     while True:
         timeout_s = max(0.0, next_state_s - time.monotonic())
@@ -201,12 +236,14 @@ async def _send_loop(websocket: WebSocket, conn: Connection, worker: SimWorker, 
             conn.frame = None
             await websocket.send_bytes(jpeg)
         if time.monotonic() >= next_state_s:
-            await websocket.send_text(json.dumps(_state_message(conn, worker, control)))
+            await websocket.send_text(json.dumps(_state_message(conn, worker, control, recording)))
             next_state_s = time.monotonic() + config.STATE_SEND_INTERVAL_S
 
 
-def _state_message(conn: Connection, worker: SimWorker, control: ControlWorker) -> dict[str, Any]:
-    return {
+def _state_message(
+    conn: Connection, worker: SimWorker, control: ControlWorker, recording: RecordingService | None = None
+) -> dict[str, Any]:
+    message = {
         "type": "state",
         "hand_count": conn.hand_count,
         "invalid_count": conn.invalid_count,
@@ -217,6 +254,9 @@ def _state_message(conn: Connection, worker: SimWorker, control: ControlWorker) 
         # 지금 적용 중인 보기 방향(서버에 하나뿐, 마지막에 보낸 값)
         "view": worker.view.as_dict(),
     }
+    if recording is not None:
+        message["record"] = recording.state()  # 녹화 상태(3-2): docs/08-recording.md
+    return message
 
 
 app = create_app()

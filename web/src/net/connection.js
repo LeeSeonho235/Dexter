@@ -1,7 +1,7 @@
 // 파이썬 서버와의 WebSocket 연결 (React에 의존하지 않음).
 //
 // 보내는 것: hand 메시지(JSON 텍스트, 최대 HAND_SEND_MAX_HZ), view(보기 방향, 최대 VIEW_SEND_MAX_HZ),
-// height(키보드 높이, 누르는 동안 HEIGHT_REPEAT_HZ), ping.
+// height(키보드 높이, 누르는 동안 HEIGHT_REPEAT_HZ), record/reset(녹화 버튼, 누를 때마다 한 번), ping.
 // 웹캠 영상·이미지는 보내지 않는다.
 // 받는 것: 시뮬레이션 화면 JPEG(바이너리) → onFrame(blob), state/pong/error(JSON 텍스트).
 // 끊기면 RECONNECT_DELAY_MS 뒤 다시 연결한다.
@@ -116,6 +116,15 @@ export class SimConnection {
   sendHeight(msg) {
     if (!this.ws || this.ws.readyState !== OPEN) return false
     if (!msg || msg.type !== 'height') return false
+    this.ws.send(JSON.stringify(msg))
+    return true
+  }
+
+  // 녹화 명령({type:'record', action, episode?})이나 블록 리셋({type:'reset'})을 보낸다(record/view.js commandFor가 만든 메시지).
+  // 빈도 제한이 없다(사람이 버튼을 누를 때만 보낸다). 연결이 열려 있지 않거나 다른 종류의 메시지면 false.
+  sendRecord(msg) {
+    if (!this.ws || this.ws.readyState !== OPEN) return false
+    if (!msg || (msg.type !== 'record' && msg.type !== 'reset')) return false
     this.ws.send(JSON.stringify(msg))
     return true
   }

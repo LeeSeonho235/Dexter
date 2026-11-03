@@ -25,6 +25,8 @@ PING_FIELDS = frozenset({"type", "id"})
 VIEW_FIELDS = frozenset({"type", "azimuth", "elevation", "distance"})
 HEIGHT_FIELDS = frozenset({"type", "dir", "slow"})
 HEIGHT_DIRECTIONS = (-1, 0, 1)
+RECORD_ACTIONS = ("start", "stop_success", "stop_fail", "discard", "delete_last")
+RESET_FIELDS = frozenset({"type"})
 
 
 class ProtocolError(ValueError):
@@ -54,6 +56,10 @@ def parse_client_message(raw: str | bytes, max_bytes: int) -> dict[str, Any]:
         return validate_view(msg)
     if msg_type == "height":
         return validate_height(msg)
+    if msg_type == "record":
+        return validate_record(msg)
+    if msg_type == "reset":
+        return validate_reset(msg)
     raise ProtocolError(f"unknown type: {msg_type!r}")
 
 
@@ -117,6 +123,27 @@ def validate_height(msg: dict[str, Any]) -> dict[str, Any]:
         raise ProtocolError("dir must be -1, 0 or 1")
     if not isinstance(msg["slow"], bool):
         raise ProtocolError("slow must be true/false")
+    return msg
+
+
+def validate_record(msg: dict[str, Any]) -> dict[str, Any]:
+    """녹화 명령: {"type":"record","action": start|stop_success|stop_fail|discard|delete_last}.
+    delete_last만 "episode"(0 이상의 정수, 화면이 알고 있는 가장 최근 번호)를 함께 보낸다. 그 외는 모두 거부한다."""
+    action = msg.get("action")
+    if not isinstance(action, str) or action not in RECORD_ACTIONS:
+        raise ProtocolError(f"action must be one of {list(RECORD_ACTIONS)}")
+    expected = {"type", "action"} | ({"episode"} if action == "delete_last" else set())
+    _check_fields(msg, frozenset(expected))
+    if action == "delete_last":
+        episode = msg["episode"]
+        if isinstance(episode, bool) or not isinstance(episode, int) or episode < 0:
+            raise ProtocolError("episode must be an integer >= 0")
+    return msg
+
+
+def validate_reset(msg: dict[str, Any]) -> dict[str, Any]:
+    """블록 리셋: {"type":"reset"}. 시드는 서버가 순서대로 정하므로 다른 필드는 받지 않는다."""
+    _check_fields(msg, RESET_FIELDS)
     return msg
 
 

@@ -13,13 +13,17 @@ import io
 import logging
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import mujoco
 import numpy as np
 from PIL import Image
 
+from server import config
+from server.render import set_render_flags
 from server.view import CameraView, apply_view, default_view, make_free_camera
 
 log = logging.getLogger(__name__)
@@ -32,6 +36,68 @@ TIP_SITE = "gripperframe"
 
 # (프레임 번호, JPEG bytes)를 받는 함수. 시뮬레이션 스레드에서 불리므로 빨리 끝나야 한다.
 FrameCallback = Callable[[int, bytes], None]
+
+
+@dataclass
+class PlaceResult:
+    """place_block 결과. block_m은 놓은 뒤 블록 중심(m)."""
+
+    ok: bool
+    reason: str = ""
+    block_m: tuple[float, float, float] | None = None
+
+
+@dataclass(eq=False)
+class _PlaceCommand:
+    x_m: float
+    y_m: float
+    done: threading.Event = field(default_factory=threading.Event)
+    result: PlaceResult = field(default_factory=lambda: PlaceResult(False, "not executed"))
+
+
+class TickStats:
+    """틱 시작 사이의 벽시계 간격(ms): 시작 이후 전체와 최근 N개. 스레드 안전.
+
+    공칭 주기는 1/SIM_TICK_HZ(33.3 ms)다. 화면 렌더링이 있는 틱은 약 55 ms 걸려서 그 뒤 틱이 짧게 따라오는 것은 정상이다.
+    """
+
+    def __init__(self, window: int = config.TICK_STATS_WINDOW, over_ms: tuple[float, ...] = config.TICK_OVER_MS) -> None:
+        self._lock = threading.Lock()
+        self._over_ms = over_ms
+        self._window: deque[float] = deque(maxlen=window)
+        self.reset()
+
+    def reset(self) -> None:
+        with self._lock:
+            self._window.clear()
+            self._n = 0
+            self._sum_ms = 0.0
+            self._max_ms = 0.0
+            self._over = [0] * len(self._over_ms)
+
+    def add(self, interval_s: float) -> None:
+        ms = interval_s * 1000.0
+        with self._lock:
+            self._window.append(ms)
+            self._n += 1
+            self._sum_ms += ms
+            self._max_ms = max(self._max_ms, ms)
+            for i, limit in enumerate(self._over_ms):
+                if ms > limit:
+                    self._over[i] += 1
+
+    def summary(self) -> dict:
+        """전체(시작 또는 reset 이후)와 최근 구간의 평균, 최대, 기준 초과 횟수."""
+        with self._lock:
+            window = list(self._window)
+            return {
+                "n": self._n,
+                "mean_ms": round(self._sum_ms / self._n, 2) if self._n else None,
+                "max_ms": round(self._max_ms, 2) if self._n else None,
+                "over": {f"{limit:g}": count for limit, count in zip(self._over_ms, self._over, strict=True)},
+                "recent_mean_ms": round(sum(window) / len(window), 2) if window else None,
+                "recent_max_ms": round(max(window), 2) if window else None,
+            }
 
 
 class SimWorker:
@@ -79,6 +145,10 @@ class SimWorker:
         self._view = view or default_view()  # 보기 방향은 하나뿐: 마지막에 set_view로 받은 값이 다음 렌더링부터 적용된다
         self._rendered_view: CameraView | None = None  # 가장 최근 프레임을 그린 보기 방향(고정 카메라면 None)
         self._free_camera: mujoco.MjvCamera | None = None  # 시뮬레이션 스레드에서만 만들고 쓴다
+        self._recorder = None  # 녹화기(server/recorder.py). 있으면 물리 스텝 직전마다 on_step을 부른다
+        self._place_cmd: _PlaceCommand | None = None  # 다른 스레드가 맡긴 "블록 놓기" 명령 한 개
+        self._timestep_s: float | None = None  # 모델 로드 뒤에 정해진다
+        self.tick_stats = TickStats()
 
         self._stop = threading.Event()
         self._ready = threading.Event()
@@ -120,6 +190,35 @@ class SimWorker:
         """자유 카메라의 보기 방향을 정한다(다음 렌더링부터). 화면 보는 브라우저가 없으면 렌더링은 여전히 안 한다."""
         with self._lock:
             self._view = view
+
+    def attach_recorder(self, recorder) -> None:
+        """녹화기를 연결한다(None이면 떼어낸다). 시뮬레이션 스레드가 물리 스텝 직전마다 recorder.on_step(시각, qpos, ctrl)을 부른다."""
+        self._recorder = recorder
+
+    @property
+    def timestep_s(self) -> float | None:
+        """모델의 물리 스텝(s). start()가 끝난 뒤에 값이 있다."""
+        return self._timestep_s
+
+    def place_block(self, x_m: float, y_m: float, timeout_s: float = 1.0) -> PlaceResult:
+        """블록을 (x, y)(m) 바닥 위에 회전 없이 놓고 속도를 0으로 만든다. 실제 일은 시뮬레이션 스레드가 다음 틱에 하고 여기서는 기다린다.
+
+        놓은 자리에서 블록이 바닥 말고 다른 것(팔, 집게)과 닿으면 놓지 않고(원래 자리로 되돌림) 실패로 돌려준다.
+        """
+        cmd = _PlaceCommand(float(x_m), float(y_m))
+        with self._lock:
+            if self._place_cmd is not None:
+                return PlaceResult(False, "another place_block is pending")
+            self._place_cmd = cmd
+        if not cmd.done.wait(timeout_s):
+            with self._lock:
+                if self._place_cmd is cmd:  # 아직 시뮬레이션 스레드가 집어가지 않았다: 거둔다
+                    self._place_cmd = None
+                    return PlaceResult(False, "sim thread did not run the command in time")
+            cmd.done.wait(1.0)  # 막 집어간 경우: 끝나기를 조금 더 기다린다
+            if not cmd.done.is_set():
+                return PlaceResult(False, "place_block timed out")
+        return cmd.result
 
     @property
     def view(self) -> CameraView:
@@ -173,6 +272,7 @@ class SimWorker:
             mujoco.mj_resetDataKeyframe(model, data, model.key(self._keyframe).id)
             mujoco.mj_forward(model, data)
             renderer = mujoco.Renderer(model, self._height_px, self._width_px)
+            self._timestep_s = float(model.opt.timestep)
         except BaseException as err:  # noqa: BLE001 - start()에서 다시 던진다
             self._error = err
             self._ready.set()
@@ -198,18 +298,30 @@ class SimWorker:
         tip_site_id = model.site(TIP_SITE).id
         block_body_id = model.body("block").id
         tick_count = 0
+        last_tick_start_s: float | None = None
 
         while not self._stop.is_set():
+            tick_start_s = time.perf_counter()
+            if last_tick_start_s is not None:
+                self.tick_stats.add(tick_start_s - last_tick_start_s)
+            last_tick_start_s = tick_start_s
             tick_count += 1
             with self._lock:
                 ctrl = self._ctrl
+                place_cmd, self._place_cmd = self._place_cmd, None
+            if place_cmd is not None:
+                self._do_place_block(model, data, place_cmd)
             if ctrl is not None:
                 data.ctrl[:6] = ctrl
             target_sim_s = time.monotonic() - wall_start_s + offset_s
             if target_sim_s - data.time > self._max_catch_up_s:
                 offset_s -= target_sim_s - data.time - self._max_catch_up_s
                 target_sim_s = data.time + self._max_catch_up_s
+            recorder = self._recorder
             while data.time + timestep_s <= target_sim_s:
+                if recorder is not None:
+                    # 물리 스텝 직전: qpos와 지금 적용 중인 ctrl을 한 번에 복사한다(server/recorder.py의 짝 맞추기 규칙).
+                    recorder.on_step(data.time, data.qpos, data.ctrl)
                 mujoco.mj_step(model, data)
 
             # mj_step 뒤의 site, body 위치는 한 스텝 전 값이라 위치만 다시 계산한다(상태는 안 바뀐다).
@@ -235,6 +347,37 @@ class SimWorker:
                 next_tick_s = now_s
             self._stop.wait(max(0.0, next_tick_s - now_s))
 
+    def _do_place_block(self, model: mujoco.MjModel, data: mujoco.MjData, cmd: _PlaceCommand) -> None:
+        """시뮬레이션 스레드에서만 부른다. 블록 qpos를 옮기고 qvel을 0으로 만든 뒤, 바닥 외의 접촉이 생기면 되돌린다."""
+        try:
+            joint = model.joint("block_free")
+            q_adr, v_adr = int(joint.qposadr[0]), int(joint.dofadr[0])
+            block_geom, floor_geom = model.geom("block").id, model.geom("floor").id
+            half_m = float(model.geom("block").size[2])
+            old_q = data.qpos[q_adr : q_adr + 7].copy()
+            old_v = data.qvel[v_adr : v_adr + 6].copy()
+            data.qpos[q_adr : q_adr + 7] = [cmd.x_m, cmd.y_m, half_m, 1.0, 0.0, 0.0, 0.0]
+            data.qvel[v_adr : v_adr + 6] = 0.0
+            mujoco.mj_forward(model, data)
+            blocked = False
+            for i in range(data.ncon):
+                pair = {data.contact[i].geom1, data.contact[i].geom2}
+                if block_geom in pair and floor_geom not in pair:
+                    blocked = True
+                    break
+            if blocked:
+                data.qpos[q_adr : q_adr + 7] = old_q
+                data.qvel[v_adr : v_adr + 6] = old_v
+                mujoco.mj_forward(model, data)
+                cmd.result = PlaceResult(False, "block would touch the robot at that position")
+            else:
+                cmd.result = PlaceResult(True, "", (cmd.x_m, cmd.y_m, half_m))
+        except Exception as err:  # noqa: BLE001 - 대기 중인 호출이 영원히 기다리지 않게 항상 알린다
+            log.exception("place_block failed")
+            cmd.result = PlaceResult(False, f"{type(err).__name__}: {err}")
+        finally:
+            cmd.done.set()
+
     def _render_and_publish(self, renderer: mujoco.Renderer, data: mujoco.MjData) -> None:
         view: CameraView | None = None
         camera: str | mujoco.MjvCamera = self._camera
@@ -247,9 +390,8 @@ class SimWorker:
                 apply_view(self._free_camera, view)
             camera = self._free_camera
         renderer.update_scene(data, camera=camera)
-        # 그리기 옵션은 매번 정한다(server/config.py RENDER_SHADOW, RENDER_REFLECTION).
-        renderer.scene.flags[mujoco.mjtRndFlag.mjRND_SHADOW] = self._shadow
-        renderer.scene.flags[mujoco.mjtRndFlag.mjRND_REFLECTION] = self._reflection
+        # 그리기 옵션은 매번 정한다(server/config.py RENDER_SHADOW, RENDER_REFLECTION). 학습 이미지(server/render.py)와 같은 함수다.
+        set_render_flags(renderer, self._shadow, self._reflection)
         pixels = renderer.render()
         buf = io.BytesIO()
         Image.fromarray(pixels).save(buf, format="JPEG", quality=self._jpeg_quality)

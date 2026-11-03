@@ -3,6 +3,7 @@ import ConnectionPanel from './components/ConnectionPanel.jsx'
 import ControlHandPanel from './components/ControlHandPanel.jsx'
 import FeaturePanel from './components/FeaturePanel.jsx'
 import HandView from './components/HandView.jsx'
+import RecordPanel from './components/RecordPanel.jsx'
 import RobotPanel from './components/RobotPanel.jsx'
 import SimView from './components/SimView.jsx'
 import { handEdgeStatus } from './hand/edge.js'
@@ -105,6 +106,9 @@ export default function App() {
   // 키보드 높이(↓/S 내리기, ↑/W 올리기, Shift = 천천히). 눌린 키 상태를 돌려받아 화면에 표시한다.
   const heightKeys = useHeightKeys({ connRef, connected })
 
+  // 녹화 버튼(record/view.js commandFor가 만든 메시지)을 서버로 보낸다. 서버가 거절하면 state.record.last_event에 이유가 온다.
+  const onRecordCommand = useCallback((msg) => connRef.current?.sendRecord(msg), [])
+
   return (
     <main>
       <h1>손으로 시뮬레이션 로봇 조종</h1>
@@ -123,6 +127,9 @@ export default function App() {
           onWheel={onViewWheel}
           onPreset={onViewPreset}
         />
+      </div>
+      <div className="layout">
+        <RecordPanel record={serverState?.record} connected={connected} onCommand={onRecordCommand} />
       </div>
       <div className="layout">
         <ControlHandPanel

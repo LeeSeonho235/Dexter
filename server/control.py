@@ -28,6 +28,7 @@ from server.gripper import GripperLatch
 from server.height import HeightCommands
 from server.ik import ArmIK, limit_joint_step
 from server.mapping import HandMapper
+from server.reset import BlockReset, ResetAction
 from server.sim_worker import SimWorker
 
 log = logging.getLogger(__name__)
@@ -83,7 +84,7 @@ class ControlWorker:
         self._ik_factory = ik_factory
         # 설정값 MAPPING_MODE(기본 "relative"), Z_FROM_HAND_SCALE(기본 False: 높이는 키보드)을 여기서 넘긴다.
         # HandMapper 자체의 기본값은 "absolute"와 z_from_hand_scale=True(2-2, 2-4 동작)다.
-        self._mapper = mapper or HandMapper(mode=config.MAPPING_MODE, z_from_hand_scale=config.Z_FROM_HAND_SCALE)
+        self._mapper = mapper or self._new_mapper()
         self._height = HeightCommands(
             config.HEIGHT_SPEED_M_S,
             config.HEIGHT_SLOW_SPEED_M_S,
@@ -93,6 +94,18 @@ class ControlWorker:
         self._gripper = gripper or GripperLatch(config.PINCH_CLOSE_BELOW, config.PINCH_OPEN_ABOVE)
         self._tick_s = 1.0 / control_hz
         self._clock = clock
+
+        # 블록 리셋(3-2): request_reset()이 요청을 넣고, 제어 스레드가 tick마다 한 걸음씩 진행한다.
+        self._reset = BlockReset(
+            tolerance_rad=config.RESET_PARK_TOLERANCE_RAD,
+            hold_s=config.RESET_PARK_HOLD_S,
+            timeout_s=config.RESET_TIMEOUT_S,
+            settle_s=config.RESET_SETTLE_S,
+            block_tolerance_m=config.RESET_BLOCK_TOLERANCE_M,
+            block_half_m=config.BLOCK_HALF_M,
+        )
+        self._reset_request: tuple[int, tuple[float, float], Callable[[int, bool, str], None]] | None = None
+        self._reset_callback: Callable[[int, bool, str], None] | None = None
 
         self._lock = threading.Lock()
         self._pending: tuple[dict | None, float] | None = None
@@ -154,6 +167,30 @@ class ControlWorker:
         with self._lock:
             self._height.command(direction, slow, self._clock() if recv_s is None else recv_s)
         self._wake.set()
+
+    def request_reset(
+        self, seed: int, xy_m: tuple[float, float], on_done: Callable[[int, bool, str], None]
+    ) -> str | None:
+        """블록 리셋을 요청한다(팔을 올리고 → 블록을 (x, y)(m)에 놓는다). 받아들였으면 None, 아니면 이유.
+        끝나면 제어 스레드가 on_done(seed, 성공 여부, 이유)를 부른다. 리셋 중에는 손과 키보드 높이 입력을 무시한다."""
+        with self._lock:
+            if self._reset.active or self._reset_request is not None:
+                return "a reset is already running"
+            if self._ik is None:
+                return "control is not started"
+            self._reset_request = (seed, xy_m, on_done)
+        self._wake.set()
+        return None
+
+    @property
+    def resetting(self) -> bool:
+        with self._lock:
+            return self._reset.active or self._reset_request is not None
+
+    @property
+    def reset_phase(self) -> str:
+        with self._lock:
+            return "requested" if self._reset_request is not None else self._reset.phase.value
 
     def state(self) -> dict:
         """상태 메시지에 넣을 값(JSON으로 보낼 수 있는 것만)."""
@@ -239,8 +276,87 @@ class ControlWorker:
             # 새 메시지가 오면 바로, 안 오면 한 틱 뒤에 다시 돈다(goal 쪽으로 계속 가야 하므로).
             self._wake.wait(self._tick_s)
 
+    @staticmethod
+    def _new_mapper() -> HandMapper:
+        return HandMapper(mode=config.MAPPING_MODE, z_from_hand_scale=config.Z_FROM_HAND_SCALE)
+
+    def _park_ctrl(self) -> np.ndarray:
+        """리셋 때 팔이 가는 자세: home(위로 세움) + 집게 열림."""
+        park = self._home_ctrl()
+        park[ARM_DOF] = config.GRIPPER_OPEN_RAD
+        return park
+
+    def _tick_reset(self) -> None:
+        """리셋 한 걸음: 팔을 park 자세로 한 틱 옮기고, 도착하면 블록을 놓고, 가라앉으면 끝낸다. 손·높이 입력은 버린다."""
+        with self._lock:
+            self._pending = None
+            self._height.reset()
+        now_s = self._clock()
+        park = self._park_ctrl()
+        scale = 1.0 if self._last_step_s is None else min(1.0, max(0.0, (now_s - self._last_step_s) / self._tick_s))
+        self._last_step_s = now_s
+        new_ctrl = self._ctrl.copy()
+        new_ctrl[:ARM_DOF] = limit_joint_step(self._ctrl[:ARM_DOF], park[:ARM_DOF], config.MAX_JOINT_STEP_RAD * scale)
+        new_ctrl[ARM_DOF] = limit_joint_step(
+            self._ctrl[ARM_DOF], park[ARM_DOF], config.MAX_GRIPPER_STEP_RAD * scale
+        )
+        if not np.array_equal(new_ctrl, self._ctrl) or not self._ctrl_published:
+            self._sim.set_ctrl(new_ctrl)
+            with self._lock:
+                self._ctrl = new_ctrl
+            self._ctrl_published = True
+
+        snapshot = self._sim.snapshot
+        joints = None if snapshot is None else snapshot["joints_rad"]
+        block = None if snapshot is None else snapshot["block_m"]
+        step = self._reset.update(now_s, joints, park, block)
+        if step.action == ResetAction.PLACE:
+            assert self._reset.xy_m is not None
+            placed = self._sim.place_block(*self._reset.xy_m)
+            if placed.ok:
+                self._reset.placed(self._clock())
+            else:
+                step = self._reset.fail(placed.reason)
+        if step.action in (ResetAction.DONE, ResetAction.FAILED):
+            self._finish_reset(step.action == ResetAction.DONE, step.reason)
+
+    def _finish_reset(self, ok: bool, reason: str) -> None:
+        """리셋이 끝났다(성공이든 실패든): 이전 목표·필터·집게 상태를 모두 지워 손이 다시 보일 때 처음부터 시작하게 한다.
+        ctrl은 지금 값 그대로 둔다(팔이 튀지 않는다)."""
+        assert self._ik is not None
+        self._ik.reset()
+        self._mapper = self._new_mapper()
+        self._gripper = GripperLatch(config.PINCH_CLOSE_BELOW, config.PINCH_OPEN_ABOVE)
+        with self._lock:
+            self._height.reset()
+            self._pending = None
+            self._goal_arm_rad = None
+            self._controlling = False
+            self._consecutive = 0
+            self._target_m = None
+            self._reference_hand = None
+            self._samples.clear()
+        self._last_step_s = None
+        callback, seed = self._reset_callback, self._reset.seed
+        self._reset_callback = None
+        if callback is not None and seed is not None:
+            try:
+                callback(seed, ok, reason)
+            except Exception:  # noqa: BLE001 - 콜백이 실패해도 제어 스레드는 죽지 않는다
+                log.exception("reset callback failed")
+
     def tick(self) -> None:
         """한 틱: 새 hand 메시지 처리 → ctrl 한 걸음. 스레드가 메시지가 올 때와 CONTROL_HZ 주기로 부른다."""
+        with self._lock:
+            request, self._reset_request = self._reset_request, None
+        if request is not None:
+            seed, xy_m, callback = request
+            self._reset.start(self._clock(), seed, xy_m)
+            self._reset_callback = callback
+            self._last_step_s = None
+        if self._reset.active:
+            self._tick_reset()
+            return
         with self._lock:
             pending, self._pending = self._pending, None
         hand_changed_target = False
