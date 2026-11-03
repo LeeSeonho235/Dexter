@@ -30,7 +30,7 @@
 ├─ meta/tasks.parquet                     # task 문자열 → task_index
 ├─ meta/episodes/chunk-000/file-000.parquet   # 에피소드별 길이, 파일 위치, 통계
 ├─ data/chunk-000/file-000.parquet        # 프레임 표 (state, action, timestamp, frame_index, episode_index, index, task_index)
-└─ videos/observation.images.top/chunk-000/file-000.mp4   # 에피소드가 이어붙은 영상
+└─ videos/observation.images.main/chunk-000/file-000.mp4  # 에피소드가 이어붙은 영상 (3-1 가짜 데이터셋은 키가 top이었고, 실제 데이터셋(3-3)은 main)
 ```
 
 - v3.0은 에피소드마다 파일을 만들지 않고 **여러 에피소드를 한 파일에 이어붙인다**(파일 크기 상한: data 100MB, video 200MB, `datasets/utils.py:89-90`).
@@ -65,20 +65,26 @@ ds.finalize()                # 반드시 호출. 안 하면 parquet 마무리 �
 |---|---|---|---|
 | `observation.state` | (6,) | float32 | 관절 각도(rad). 순서: shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper (`third_party/.../so101.xml` actuator 순서) |
 | `action` | (6,) | float32 | 모터 목표 각도(rad), 위와 같은 순서. 서버가 `ctrl`에 쓰는 값 그대로 |
-| `observation.images.top` | (H, W, 3) | video | 시뮬레이션 `top` 카메라(웹캠 아님). 아래 해상도 참고 |
+| `observation.images.main` | (240, 320, 3) | video | 시뮬레이션 학습 카메라(`RECORD_CAMERA_*`: 방위각 110°, 고도 -35°, 거리 0.8 m). 위에서 내려다보는 `top`이 아니라 비스듬한 시점이라 `main`으로 부른다(웹캠 아님). 3-3에서 확정 |
 | fps | 30 | | 서버의 제어·시뮬레이션 주기(`SIM_TICK_HZ`, `CONTROL_HZ`)와 같게 |
 | task | 문자열 | | 한 문장으로 고정. 예: `"pick the red block and place it on the green target"` |
 
 - 블록 위치는 관측에 넣지 않는다(이미지로만 알게 함).
 - task 문자열은 `meta/tasks.parquet`에 저장되고 프레임에는 `task_index`(숫자)로 들어간다. 데이터셋 전체에서 같은 문자열을 쓴다.
-- `observation.state`가 `qpos`인지 `ctrl`인지는 아직 정하지 않았다: 로봇이 실제로 있는 곳(qpos)을 쓰는 것이 일반적이지만 3-2에서 확정한다.
-- 4단계용 추가 칼럼(source, is_intervention, seed, success)이 이 버전에서 어떻게 들어가는지는 **확인하지 않았다**.
+- **확정(3-2, 3-3):** `observation.state[k] = qpos[k][:6]`(행동을 적용하기 전 팔 관절), `action[k] = ctrl[k][:6]`, 이미지[k] = `qpos[k]` 13개(블록 포함)로 다시 그린 그림. 규칙은 `docs/08-recording.md`의 "틱 정렬 규칙".
+- **4단계용 추가 칼럼(seed, is_intervention, source, success)을 데이터셋 안에 넣는 방법: 확인 결과(적용은 안 함).** 소스(`SP/datasets/feature_utils.py:221`, `dataset_writer.py:202`, `dataset_metadata.py:834`)를 읽고, 가짜 데이터셋(2에피소드 × 10프레임)으로 직접 돌려 확인했다.
+  - **프레임 단위 추가 feature는 된다.** `features`에 `"seed": {"dtype": "int64", "shape": (1,), "names": None}`, `"is_intervention": {"dtype": "bool", "shape": (1,), "names": None}`를 넣고 `add_frame`에 같은 키를 주면 저장된다. 다시 불러 `ds[i]["seed"]`, `ds[i]["is_intervention"]`가 나오고(`tensor(7)`, `tensor(True)`) `meta/stats.json`에도 통계가 생긴다. 값이 프레임마다 반복되므로 `seed`는 에피소드 안에서 같은 값을 계속 넣어야 한다.
+  - **에피소드 단위 메타(에피소드당 값 하나)를 넣는 공개 API는 못 찾았다.** `DatasetMetadata.save_episode(..., episode_metadata)`는 있지만 `LeRobotDataset.save_episode()`는 이 인자를 받지 않고, 안에서 만드는 값(파일 위치, 영상 구간)만 채운다. 에피소드 단위 값이 필요하면 프레임 단위 feature로 반복해서 넣는 것이 지금 확인된 방법이다.
+  - **확인하지 않은 것:** `lerobot-train`이 이런 추가 컬럼이 있는 데이터셋으로 학습되는지(ACT는 `observation.state`, `action`, 이미지만 쓰므로 무시할 것으로 보이나 실행해 보지 않았다), 데이터셋을 나중에 합치거나 컬럼을 추가하는 방법, 문자열 feature(`source`).
+  - 3-3 데이터셋에는 넣지 않았다(결정 보류). `seed`, 에피소드 번호 매핑은 `data/frames/manifest.json`의 `episodes`(raw 에피소드 번호 ↔ 시드)에 있고 데이터셋 에피소드 번호는 raw 번호 순서의 0부터다(`docs/09-dataset.md`).
 
-### 이미지 해상도·카메라 (추정 — 3-2 시작 전에 확정)
+### 이미지 해상도·카메라 (3-3에서 확정: 비스듬한 `main` 1개, 240×320)
 
+> **3-2에서 `top`이 아니라 비스듬한 학습 카메라(`RECORD_CAMERA_*`, 방위각 110°·고도 -35°·거리 0.8 m)로 정했다.** 키는 `observation.images.main`이다.
+> 이 카메라에서 블록은 약 13~15 × 15~19 px로 보인다(`docs/08-recording.md`). 아래 `top` 추천 문단은 3-1 때의 **추정이라 그대로 두되 현재 값이 아니다.**
 > 아래 추천은 **직접 학습해서 확인한 값이 아니라 계산과 짐작**이다.
 
-- 카메라: **top 1개**를 임시 추천. 이유는 학습 비용(이미지 수에 비례)과 블록·목표·집게가 모두 보이기 때문이다. 위에서 보면 집게 높이는 알기 어렵다.
+- (3-1 때 추정, 현재 아님) 카메라: **top 1개**를 임시 추천. 이유는 학습 비용(이미지 수에 비례)과 블록·목표·집게가 모두 보이기 때문이다. 위에서 보면 집게 높이는 알기 어렵다.
 - 해상도: **240×320(세로×가로)** 임시 추천. `top` 카메라 기준 3cm 블록은 640×480에서 약 22px, 240×320에서 약 11px로 추정한다(카메라 높이 0.7m, fovy 50°로 계산한 값, 화면에서 직접 재지 않음). ACT의 ResNet18은 해상도를 정해 두지 않는다(`SP/policies/act/configuration_act.py`에 해상도 항목 없음).
 - 서버 화면 설정은 `CAMERA = "free"`(마우스로 돌리는 카메라)다. 학습 이미지는 반드시 **고정 카메라**로 그려야 한다.
 - 이미지 크기는 `shape`에 박히므로 데이터셋을 만든 뒤 바꾸려면 다시 만들어야 한다.
@@ -146,7 +152,7 @@ train/.venv/bin/lerobot-train \
 ```python
 policy = ACTPolicy.from_pretrained(ckpt_dir); policy.to("cpu"); policy.reset()   # 에피소드 시작마다 reset()
 pre, post = make_pre_post_processors(policy.config, pretrained_path=ckpt_dir)
-obs = {"observation.state": np.float32 (6,), "observation.images.top": np.uint8 (H, W, 3)}
+obs = {"observation.state": np.float32 (6,), "observation.images.main": np.uint8 (H, W, 3)}   # smoke_test.py는 키가 top인 가짜 데이터셋이라 top을 쓴다
 action = predict_action(obs, policy, torch.device("cpu"), pre, post, use_amp=False, task=TASK)
 # → torch.Tensor (1, 6) float32, 실제 관절 단위(post가 역정규화). 서버 ctrl에 넣을 값
 ```
@@ -200,11 +206,11 @@ lerobot-train --dataset.repo_id=local/handover_v1 --dataset.root=/content/handov
 ## 11. 아직 모르는 것
 
 1. **GPU/RAM 요구 사항과 예상 학습 시간**: 설치된 패키지에 문서가 없어 확인하지 못했다. 위의 CPU 실측(64×64)은 근거가 되지 않는다. 웹의 LeRobot 문서나 Colab에서 짧게 돌려 보면 알 수 있다.
-2. **이미지 해상도와 카메라 개수(추정)**: 3-2 시작 전에 확정한다. 확정 전 직접 렌더링한 PNG에서 블록 크기를 눈으로 확인할 것.
-3. **3-2에서 결정할 것: 옆 카메라(`side`)를 추가할지.** 위에서 보면 집게 높이를 알기 어렵다. `scene.xml`은 수정 금지라 카메라를 추가하려면 코드(`MjvCamera` 프리셋)로 해야 한다. 카메라가 2개면 학습 비용도 약 2배가 된다(이미지 처리량 기준 추정). 결정: 사용자.
+2. ~~이미지 해상도와 카메라 개수~~ → **3-3에서 확정: 비스듬한 `main` 카메라 1개, 240×320.** 학습이 잘 되는지는 아직 모른다.
+3. **옆 카메라(`side`)를 추가할지는 2-6(보조 카메라)에서 따로 정한다.** 아래는 3-1 때의 메모다. 위에서 보면 집게 높이를 알기 어렵다. `scene.xml`은 수정 금지라 카메라를 추가하려면 코드(`MjvCamera` 프리셋)로 해야 한다. 카메라가 2개면 학습 비용도 약 2배가 된다(이미지 처리량 기준 추정). 결정: 사용자.
 4. **30fps 녹화**: 렌더링 한 장이 약 54ms라 실시간으로는 안 된다(5절). 녹화 후 다시 그리는 방식이 되는지, 그 이미지가 실시간 화면과 같은지는 3-2에서 확인한다.
-5. **`observation.state`를 qpos로 할지 ctrl로 할지**, 그리고 **`action`이 같은 시점의 ctrl인지 다음 시점인지**: 3-2에서 확정한다.
-6. **추가 칼럼**(source, is_intervention, seed, success)을 이 버전에서 어떻게 넣는지: 확인하지 않았다(4단계 전에).
+5. ~~`observation.state`를 qpos로 할지 ctrl로 할지, `action`이 같은 시점인지~~ → **확정: state = qpos[k][:6], action = 같은 k의 ctrl[k][:6]** (4절).
+6. ~~추가 칼럼을 이 버전에서 어떻게 넣는지~~ → **4절에 확인 결과가 있다.** 프레임 단위 feature(`seed`, `is_intervention`)는 된다. 에피소드 단위 메타 API는 못 찾았다. `lerobot-train`이 추가 컬럼 있는 데이터셋으로 도는지와 `source`(문자열)는 확인하지 않았다.
 7. **환경 하나로 합치기**: 서버(MuJoCo, numpy 2.5.4)와 lerobot(numpy `<2.3`)이 충돌한다. 시뮬레이션 평가를 어디서 돌릴지(별도 프로세스 + 통신, 또는 numpy를 맞춘 환경) 정해야 한다. mujoco 3.16.0이 numpy 2.2.6에서 동작하는지는 확인하지 않았다.
 8. **Hub에서 받아 학습**, `lerobot-eval`, Colab 설치는 실행해 보지 않았다.
 9. **실제 학습 양**: 시연 20개(06-experiment.md)로 ACT가 학습되는지, 필요한 스텝 수는 모른다. 에피소드 길이도 아직 모른다(`chunk_size` 100은 3.3초 분량이라 에피소드 길이를 본 뒤 조정).
