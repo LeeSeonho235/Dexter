@@ -476,3 +476,34 @@ button {
   color: #fff;
   background: #c62828;
 }
+
+/* AUTO 상자 (4-1): 녹화 상자 스타일을 그대로 쓰고 아래만 더한다 */
+.auto-status.running {
+  color: #1565c0;
+}
+
+.auto-status.success {
+  color: #1a9c3c;
+}
+
+.auto-status.fail {
+  color: #b26a00;
+}
+
+.auto-status.error {
+  color: #d03030;
+}
+
+/* 정책 프로세스 켜짐/꺼짐(남은 시간)과 "지금 끄기" 버튼: 작게 */
+.auto-policy {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 4px;
+}
+
+.auto-shutdown {
+  padding: 2px 8px;
+  font-size: 12px;
+}

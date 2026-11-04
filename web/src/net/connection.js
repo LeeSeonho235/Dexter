@@ -129,6 +129,15 @@ export class SimConnection {
     return true
   }
 
+  // AUTO 명령({type:'auto', action:'start'|'stop'|'shutdown_policy'})을 보낸다(auto/view.js commandFor가 만든 메시지).
+  // 빈도 제한이 없다(사람이 버튼을 누를 때만 보낸다). 연결이 열려 있지 않거나 다른 종류의 메시지면 false.
+  sendAuto(msg) {
+    if (!this.ws || this.ws.readyState !== OPEN) return false
+    if (!msg || msg.type !== 'auto') return false
+    this.ws.send(JSON.stringify(msg))
+    return true
+  }
+
   getStats() {
     const nowMs = this.now()
     return {

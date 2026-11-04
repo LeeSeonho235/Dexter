@@ -22,8 +22,9 @@ import mujoco
 import numpy as np
 from PIL import Image
 
-from server import config
-from server.render import set_render_flags
+from server import auto_config, config
+from server.owner import ControlOwner
+from server.render import StateRenderer, set_render_flags
 from server.view import CameraView, apply_view, default_view, make_free_camera
 
 log = logging.getLogger(__name__)
@@ -147,6 +148,11 @@ class SimWorker:
         self._free_camera: mujoco.MjvCamera | None = None  # 시뮬레이션 스레드에서만 만들고 쓴다
         self._recorder = None  # 녹화기(server/recorder.py). 있으면 물리 스텝 직전마다 on_step을 부른다
         self._place_cmd: _PlaceCommand | None = None  # 다른 스레드가 맡긴 "블록 놓기" 명령 한 개
+        # 제어 주체(server/owner.py). AUTO이면 ControlWorker가 정한 ctrl을 적용하지 않는다(ctrl을 쓰는 주체는 하나).
+        self.owner = ControlOwner()
+        self._auto_cmd = None  # 다른 스레드가 맡긴 AUTO 에피소드(server/auto.py AutoEpisode) 한 개. 시뮬레이션 스레드가 집어간다
+        self._auto = None  # 지금 실행 중인 AUTO 에피소드(시뮬레이션 스레드에서만 만지고 바꾼다)
+        self._state_renderer: StateRenderer | None = None  # 학습과 같은 카메라로 그리는 렌더러. 첫 AUTO 때 시뮬레이션 스레드에서 만든다
         self._timestep_s: float | None = None  # 모델 로드 뒤에 정해진다
         self.tick_stats = TickStats()
 
@@ -194,6 +200,17 @@ class SimWorker:
     def attach_recorder(self, recorder) -> None:
         """녹화기를 연결한다(None이면 떼어낸다). 시뮬레이션 스레드가 물리 스텝 직전마다 recorder.on_step(시각, qpos, ctrl)을 부른다."""
         self._recorder = recorder
+
+    def start_auto(self, episode) -> str | None:
+        """AUTO 에피소드를 시뮬레이션 스레드에 맡긴다(다음 틱에 시작). 받아들였으면 None, 아니면 이유.
+        호출하는 쪽이 먼저 owner를 AUTO로 잡아야 한다(server/auto.py AutoRunner)."""
+        with self._lock:
+            if self._auto_cmd is not None or self._auto is not None:
+                return "AUTO가 이미 실행 중입니다"
+            if not self.is_alive:
+                return "시뮬레이션 스레드가 꺼져 있습니다"
+            self._auto_cmd = episode
+        return None
 
     @property
     def timestep_s(self) -> float | None:
@@ -286,6 +303,8 @@ class SimWorker:
         except Exception:
             log.exception("sim worker crashed")
         finally:
+            if self._state_renderer is not None:
+                self._state_renderer.close()
             renderer.close()
             log.info("sim worker stopped, renderer closed")
 
@@ -309,16 +328,33 @@ class SimWorker:
             with self._lock:
                 ctrl = self._ctrl
                 place_cmd, self._place_cmd = self._place_cmd, None
+                auto_cmd, self._auto_cmd = self._auto_cmd, None
             if place_cmd is not None:
                 self._do_place_block(model, data, place_cmd)
-            if ctrl is not None:
+            if auto_cmd is not None:
+                self._begin_auto(model, data, auto_cmd)
+                # 시작(렌더러 만들기, exact_start의 시간 되돌리기)에 걸린 시간과 시각 변화는 따라잡지 않는다: 시뮬레이션 시각 기준을 다시 잡는다.
+                offset_s = data.time - (time.monotonic() - wall_start_s)
+            # AUTO가 ctrl을 쓰는 동안(owner가 AUTO)은 ControlWorker가 정한 값을 적용하지 않는다.
+            if ctrl is not None and not self.owner.is_auto:
                 data.ctrl[:6] = ctrl
             target_sim_s = time.monotonic() - wall_start_s + offset_s
-            if target_sim_s - data.time > self._max_catch_up_s:
-                offset_s -= target_sim_s - data.time - self._max_catch_up_s
-                target_sim_s = data.time + self._max_catch_up_s
+            # AUTO 중에는 따라잡기 상한을 줄인다: 렌더링 틱 정도의 지연만 따라잡고, 몰아서 돌지 않는다.
+            catch_up_s = auto_config.AUTO_CATCH_UP_S if self._auto is not None else self._max_catch_up_s
+            if target_sim_s - data.time > catch_up_s:
+                offset_s -= target_sim_s - data.time - catch_up_s
+                target_sim_s = data.time + catch_up_s
             recorder = self._recorder
             while data.time + timestep_s <= target_sim_s:
+                auto = self._auto
+                if auto is not None:
+                    blocked = auto.before_step(model, data)  # 샘플 시각이면 관측 → (필요하면 정책을 기다림) → ctrl
+                    if not auto.active:
+                        self._auto = None
+                    if blocked:
+                        # 정책을 기다리는 동안 물리 시간은 멈춰 있었다. 벽시계가 흐른 만큼을 따라잡지 않도록 시각 기준을 다시 잡고 이 틱의 물리를 끝낸다.
+                        offset_s = data.time - (time.monotonic() - wall_start_s)
+                        break
                 if recorder is not None:
                     # 물리 스텝 직전: qpos와 지금 적용 중인 ctrl을 한 번에 복사한다(server/recorder.py의 짝 맞추기 규칙).
                     recorder.on_step(data.time, data.qpos, data.ctrl)
@@ -346,6 +382,22 @@ class SimWorker:
                 # 렌더링 틱(약 55ms) 뒤에 빠른 틱이 바로 따라오게 한다. 리셋하면 틱 30Hz에서 화면이 15fps에 못 미친다.
                 next_tick_s = now_s
             self._stop.wait(max(0.0, next_tick_s - now_s))
+
+    def _begin_auto(self, model: mujoco.MjModel, data: mujoco.MjData, episode) -> None:
+        """시뮬레이션 스레드에서만 부른다. 학습용 렌더러(EGL)를 이 스레드에서 처음 만들고 에피소드를 시작한다. 실패하면 에피소드를 오류로 끝낸다."""
+        try:
+            if self._state_renderer is None:
+                renderer = StateRenderer()
+                # 렌더러 인스턴스의 첫 렌더링만 몇 픽셀이 다르다(docs/07-lerobot-notes.md): 평가(EvalEnv)처럼 버리는 렌더링을 한 번 한다.
+                renderer.render(model.key(config.START_KEYFRAME).qpos)
+                self._state_renderer = renderer
+            episode.begin(model, data, self._state_renderer)
+            self.tick_stats.reset()  # AUTO 중 틱 간격만 재려고(docs/12-auto.md)
+            self._auto = episode
+        except Exception as err:  # noqa: BLE001 - 시작하지 못하면 AUTO를 오류로 끝내 owner를 돌려준다
+            log.exception("auto begin failed")
+            episode.active = True  # _finish가 한 번만 동작하도록
+            episode._finish(data, "error", f"{type(err).__name__}: {err}")
 
     def _do_place_block(self, model: mujoco.MjModel, data: mujoco.MjData, cmd: _PlaceCommand) -> None:
         """시뮬레이션 스레드에서만 부른다. 블록 qpos를 옮기고 qvel을 0으로 만든 뒤, 바닥 외의 접촉이 생기면 되돌린다."""

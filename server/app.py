@@ -28,9 +28,14 @@ from typing import Any  # noqa: E402
 
 from fastapi import FastAPI, WebSocket  # noqa: E402
 
-from server import config  # noqa: E402
+import numpy as np  # noqa: E402
+
+from server import auto_config, config  # noqa: E402
+from server.auto import AutoRunner  # noqa: E402
 from server.control import ControlWorker  # noqa: E402
 from server.episode_store import EpisodeStore  # noqa: E402
+from server.owner import ControlOwner  # noqa: E402
+from server.policy_ipc import PolicyClient  # noqa: E402
 from server.protocol import ProtocolError, hand_summary, parse_client_message  # noqa: E402
 from server.recording import RecordingService  # noqa: E402
 from server.sim_worker import SimWorker  # noqa: E402
@@ -61,11 +66,13 @@ class Hub:
         loop: asyncio.AbstractEventLoop,
         control: ControlWorker,
         recording: RecordingService | None = None,
+        auto: AutoRunner | None = None,
     ) -> None:
         self.worker = worker
         self.loop = loop
         self.control = control
         self.recording = recording
+        self.auto = auto
         self.connections: set[Connection] = set()
 
     def add(self, conn: Connection) -> None:
@@ -89,10 +96,14 @@ class Hub:
             conn.wake.set()
 
 
-def create_app(worker_factory=None, *, record_dir=None, record_max_s=None, record_store=None) -> FastAPI:
+def create_app(
+    worker_factory=None, *, record_dir=None, record_max_s=None, record_store=None, policy_client=None, auto_max_s=None
+) -> FastAPI:
     """worker_factory(on_frame) -> SimWorker. 테스트에서 바꿔 끼울 수 있게 둔다.
     record_dir: 에피소드 저장 폴더(기본 config.RECORD_DIR). record_max_s: 최대 길이(기본 config.RECORD_MAX_S).
-    record_store: 저장소 자체를 바꿔 끼울 때(테스트에서 쓰기 실패를 흉내 낼 때)."""
+    record_store: 저장소 자체를 바꿔 끼울 때(테스트에서 쓰기 실패를 흉내 낼 때).
+    policy_client: AUTO가 쓰는 정책 클라이언트(기본: train/.venv의 정책 프로세스를 AUTO 첫 시작 때 띄우는 PolicyClient). 테스트에서 가짜로 바꾼다.
+    auto_max_s: AUTO 최대 시간(기본 server/auto_config.py AUTO_MAX_S)."""
 
     def default_factory(on_frame):
         return SimWorker(
@@ -129,6 +140,25 @@ def create_app(worker_factory=None, *, record_dir=None, record_max_s=None, recor
         recording = await asyncio.to_thread(lambda: RecordingService(worker, control, store=store, **kwargs))
         recording.start()
         hub.recording = recording
+
+        # AUTO(4-1): 정책 프로세스는 여기서 띄우지 않는다(AUTO 첫 시작 때 띄운다).
+        owner = getattr(worker, "owner", None) or ControlOwner()
+
+        def arm_check() -> str | None:
+            """AUTO는 리셋이 끝난 home 자세에서 시작한다(평가와 같은 시작 자세). 리셋 뒤 손으로 움직였으면 거절."""
+            snapshot = worker.snapshot
+            if snapshot is None:
+                return "시뮬레이션이 아직 준비되지 않았습니다"
+            deviation_rad = float(np.max(np.abs(np.asarray(snapshot["joints_rad"]) - control.park_ctrl())))
+            if deviation_rad > auto_config.AUTO_START_ARM_TOLERANCE_RAD:
+                return f"팔이 home 자세에서 {deviation_rad:.2f} rad 벗어나 있습니다. 블록 리셋을 다시 하세요"
+            return None
+
+        auto = AutoRunner(
+            worker, owner, policy_client or PolicyClient(), recording, control=control, arm_check=arm_check,
+            max_s=auto_config.AUTO_MAX_S if auto_max_s is None else auto_max_s,
+        )
+        hub.auto = auto
         app.state.hub = hub
         log.info(
             "sim worker started (camera=%s, %d fps, tick %d Hz), control %d Hz, recording dir %s",
@@ -137,6 +167,7 @@ def create_app(worker_factory=None, *, record_dir=None, record_max_s=None, recor
         try:
             yield
         finally:
+            await asyncio.to_thread(auto.close)  # 실행 중이면 멈추고 정책 프로세스를 끈다
             await asyncio.to_thread(recording.close)
             await asyncio.to_thread(control.stop)
             await asyncio.to_thread(worker.stop)
@@ -149,8 +180,8 @@ def create_app(worker_factory=None, *, record_dir=None, record_max_s=None, recor
         await websocket.accept()
         conn = Connection()
         hub.add(conn)
-        receiver = asyncio.create_task(_receive_loop(websocket, conn, hub.control, hub.worker, hub.recording))
-        sender = asyncio.create_task(_send_loop(websocket, conn, hub.worker, hub.control, hub.recording))
+        receiver = asyncio.create_task(_receive_loop(websocket, conn, hub.control, hub.worker, hub.recording, hub.auto))
+        sender = asyncio.create_task(_send_loop(websocket, conn, hub.worker, hub.control, hub.recording, hub.auto))
         try:
             done, _ = await asyncio.wait({receiver, sender}, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
@@ -175,6 +206,7 @@ async def _receive_loop(
     control: ControlWorker,
     worker: SimWorker,
     recording: RecordingService | None = None,
+    auto: AutoRunner | None = None,
 ) -> None:
     while True:
         message = await websocket.receive()
@@ -209,6 +241,12 @@ async def _receive_loop(
             if refusal is not None:
                 conn.pending_error = refusal
                 conn.wake.set()
+        elif msg["type"] == "auto" and auto is not None:
+            # AUTO 명령(4-1). 형식은 맞지만 지금은 할 수 없는 요청은 이유를 error로 돌려보낸다(invalid_count는 올리지 않는다).
+            refusal = auto.handle(msg["action"])
+            if refusal is not None:
+                conn.pending_error = refusal
+                conn.wake.set()
 
 
 async def _send_loop(
@@ -217,6 +255,7 @@ async def _send_loop(
     worker: SimWorker,
     control: ControlWorker,
     recording: RecordingService | None = None,
+    auto: AutoRunner | None = None,
 ) -> None:
     next_state_s = time.monotonic()
     while True:
@@ -236,12 +275,16 @@ async def _send_loop(
             conn.frame = None
             await websocket.send_bytes(jpeg)
         if time.monotonic() >= next_state_s:
-            await websocket.send_text(json.dumps(_state_message(conn, worker, control, recording)))
+            await websocket.send_text(json.dumps(_state_message(conn, worker, control, recording, auto)))
             next_state_s = time.monotonic() + config.STATE_SEND_INTERVAL_S
 
 
 def _state_message(
-    conn: Connection, worker: SimWorker, control: ControlWorker, recording: RecordingService | None = None
+    conn: Connection,
+    worker: SimWorker,
+    control: ControlWorker,
+    recording: RecordingService | None = None,
+    auto: AutoRunner | None = None,
 ) -> dict[str, Any]:
     message = {
         "type": "state",
@@ -256,6 +299,8 @@ def _state_message(
     }
     if recording is not None:
         message["record"] = recording.state()  # 녹화 상태(3-2): docs/08-recording.md
+    if auto is not None:
+        message["auto"] = auto.state()  # AUTO 상태(4-1): docs/12-auto.md
     return message
 
 

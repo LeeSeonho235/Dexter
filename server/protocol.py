@@ -27,6 +27,8 @@ HEIGHT_FIELDS = frozenset({"type", "dir", "slow"})
 HEIGHT_DIRECTIONS = (-1, 0, 1)
 RECORD_ACTIONS = ("start", "stop_success", "stop_fail", "discard", "delete_last")
 RESET_FIELDS = frozenset({"type"})
+AUTO_ACTIONS = ("start", "stop", "shutdown_policy")
+AUTO_FIELDS = frozenset({"type", "action"})
 
 
 class ProtocolError(ValueError):
@@ -60,6 +62,8 @@ def parse_client_message(raw: str | bytes, max_bytes: int) -> dict[str, Any]:
         return validate_record(msg)
     if msg_type == "reset":
         return validate_reset(msg)
+    if msg_type == "auto":
+        return validate_auto(msg)
     raise ProtocolError(f"unknown type: {msg_type!r}")
 
 
@@ -144,6 +148,16 @@ def validate_record(msg: dict[str, Any]) -> dict[str, Any]:
 def validate_reset(msg: dict[str, Any]) -> dict[str, Any]:
     """블록 리셋: {"type":"reset"}. 시드는 서버가 순서대로 정하므로 다른 필드는 받지 않는다."""
     _check_fields(msg, RESET_FIELDS)
+    return msg
+
+
+def validate_auto(msg: dict[str, Any]) -> dict[str, Any]:
+    """AUTO 명령: {"type":"auto","action":"start"|"stop"|"shutdown_policy"}. shutdown_policy는 정책 프로세스를 지금 끄는 버튼이다.
+    그 외의 값과 다른 필드는 모두 거부한다(안전: 잘못된 값으로 로봇이 움직이면 안 된다)."""
+    _check_fields(msg, AUTO_FIELDS)
+    action = msg["action"]
+    if not isinstance(action, str) or action not in AUTO_ACTIONS:
+        raise ProtocolError(f"action must be one of {list(AUTO_ACTIONS)}")
     return msg
 
 

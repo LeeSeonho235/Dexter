@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import AutoPanel from './components/AutoPanel.jsx'
 import ConnectionPanel from './components/ConnectionPanel.jsx'
 import ControlHandPanel from './components/ControlHandPanel.jsx'
 import FeaturePanel from './components/FeaturePanel.jsx'
@@ -108,6 +109,8 @@ export default function App() {
 
   // 녹화 버튼(record/view.js commandFor가 만든 메시지)을 서버로 보낸다. 서버가 거절하면 state.record.last_event에 이유가 온다.
   const onRecordCommand = useCallback((msg) => connRef.current?.sendRecord(msg), [])
+  // AUTO 버튼(auto/view.js commandFor가 만든 메시지). 서버가 거절하면 state.auto.last_event에 이유가 온다.
+  const onAutoCommand = useCallback((msg) => connRef.current?.sendAuto(msg), [])
 
   return (
     <main>
@@ -130,6 +133,7 @@ export default function App() {
       </div>
       <div className="layout">
         <RecordPanel record={serverState?.record} connected={connected} onCommand={onRecordCommand} />
+        <AutoPanel auto={serverState?.auto} record={serverState?.record} connected={connected} onCommand={onAutoCommand} />
       </div>
       <div className="layout">
         <ControlHandPanel

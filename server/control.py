@@ -28,6 +28,7 @@ from server.gripper import GripperLatch
 from server.height import HeightCommands
 from server.ik import ArmIK, limit_joint_step
 from server.mapping import HandMapper
+from server.owner import ControlOwner
 from server.reset import BlockReset, ResetAction
 from server.sim_worker import SimWorker
 
@@ -79,8 +80,12 @@ class ControlWorker:
         gripper: GripperLatch | None = None,
         control_hz: float = config.CONTROL_HZ,
         clock: Callable[[], float] = time.monotonic,
+        owner: ControlOwner | None = None,
     ) -> None:
         self._sim = sim
+        # 제어 주체(server/owner.py). 기본은 시뮬레이션이 가진 것(SimWorker.owner), 없으면 항상 IDLE인 새 것.
+        self._owner = owner or getattr(sim, "owner", None) or ControlOwner()
+        self._adopt_ctrl: np.ndarray | None = None  # AUTO가 끝나며 넘겨 준 마지막 ctrl(제어 스레드가 다음 틱에 이어받는다)
         self._ik_factory = ik_factory
         # 설정값 MAPPING_MODE(기본 "relative"), Z_FROM_HAND_SCALE(기본 False: 높이는 키보드)을 여기서 넘긴다.
         # HandMapper 자체의 기본값은 "absolute"와 z_from_hand_scale=True(2-2, 2-4 동작)다.
@@ -181,6 +186,17 @@ class ControlWorker:
             self._reset_request = (seed, xy_m, on_done)
         self._wake.set()
         return None
+
+    def request_adopt(self, ctrl: np.ndarray) -> None:
+        """AUTO가 끝났을 때 마지막 ctrl을 이어받게 한다(다른 스레드에서 불러도 된다). 제어 스레드가 다음 틱에 이전 목표·필터·집게 상태를 지우고
+        ctrl을 이 값으로 맞춘다. 그래서 손이 다시 보일 때 팔이 AUTO의 마지막 자세에서 부드럽게 출발한다(튀지 않는다)."""
+        with self._lock:
+            self._adopt_ctrl = np.array(ctrl, dtype=float)
+        self._wake.set()
+
+    def park_ctrl(self) -> np.ndarray:
+        """home 자세 + 집게 열림(리셋이 끝나는 자세). prepare() 뒤에 쓸 수 있다."""
+        return self._park_ctrl()
 
     @property
     def resetting(self) -> bool:
@@ -323,6 +339,17 @@ class ControlWorker:
     def _finish_reset(self, ok: bool, reason: str) -> None:
         """리셋이 끝났다(성공이든 실패든): 이전 목표·필터·집게 상태를 모두 지워 손이 다시 보일 때 처음부터 시작하게 한다.
         ctrl은 지금 값 그대로 둔다(팔이 튀지 않는다)."""
+        self._clear_hand_state()
+        callback, seed = self._reset_callback, self._reset.seed
+        self._reset_callback = None
+        if callback is not None and seed is not None:
+            try:
+                callback(seed, ok, reason)
+            except Exception:  # noqa: BLE001 - 콜백이 실패해도 제어 스레드는 죽지 않는다
+                log.exception("reset callback failed")
+
+    def _clear_hand_state(self) -> None:
+        """이전 목표·필터·집게 상태를 모두 지운다(리셋이 끝났을 때, AUTO가 끝났을 때). ctrl은 건드리지 않는다."""
         assert self._ik is not None
         self._ik.reset()
         self._mapper = self._new_mapper()
@@ -337,16 +364,23 @@ class ControlWorker:
             self._reference_hand = None
             self._samples.clear()
         self._last_step_s = None
-        callback, seed = self._reset_callback, self._reset.seed
-        self._reset_callback = None
-        if callback is not None and seed is not None:
-            try:
-                callback(seed, ok, reason)
-            except Exception:  # noqa: BLE001 - 콜백이 실패해도 제어 스레드는 죽지 않는다
-                log.exception("reset callback failed")
 
     def tick(self) -> None:
         """한 틱: 새 hand 메시지 처리 → ctrl 한 걸음. 스레드가 메시지가 올 때와 CONTROL_HZ 주기로 부른다."""
+        with self._lock:
+            adopt, self._adopt_ctrl = self._adopt_ctrl, None
+        if adopt is not None and self._ik is not None:
+            self._clear_hand_state()
+            with self._lock:
+                self._ctrl = adopt
+            self._ctrl_published = True  # SimWorker도 같은 값을 이미 갖고 있다(AutoRunner가 set_ctrl로 넘김)
+        if self._owner.is_auto:
+            # AUTO가 ctrl을 쓰는 동안 손·키보드 입력은 그냥 버린다(쌓지 않는다). 한 순간에 ctrl을 쓰는 주체는 하나뿐이다.
+            with self._lock:
+                self._pending = None
+                self._height.reset()
+            self._last_step_s = None
+            return
         with self._lock:
             request, self._reset_request = self._reset_request, None
         if request is not None:

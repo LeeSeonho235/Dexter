@@ -22,6 +22,7 @@ from server import config
 from server.control import ControlWorker
 from server.episode_store import EpisodeStore, EpisodeWriter
 from server.recorder import EpisodeRecorder, FinishedEpisode
+from server.owner import ControlOwner
 from server.seeds import DEMO, block_xy_for_seed, seed_kind
 from server.sim_worker import SimWorker
 
@@ -39,9 +40,12 @@ class RecordingService:
         store: EpisodeStore | None = None,
         max_s: float = config.RECORD_MAX_S,
         timestep_s: float | None = None,
+        owner: ControlOwner | None = None,
     ) -> None:
         self._worker = worker
         self._control = control
+        # 제어 주체(server/owner.py). AUTO가 로봇을 쓰는 동안은 녹화와 블록 리셋을 받지 않는다(기본은 시뮬레이션이 가진 것).
+        self._owner = owner or getattr(worker, "owner", None) or ControlOwner()
         self._store = store or EpisodeStore()
         timestep = timestep_s if timestep_s is not None else worker.timestep_s
         if timestep is None:
@@ -82,8 +86,12 @@ class RecordingService:
 
     # --- 브라우저 명령 (asyncio 스레드). 돌려주는 값: None이면 받아들임, 문자열이면 거절 이유 ---
 
+    AUTO_BUSY = "AUTO 실행 중에는 사용할 수 없습니다. 먼저 AUTO를 중지하세요"
+
     def handle_record(self, msg: dict[str, Any]) -> str | None:
         action = msg["action"]
+        if self._owner.is_auto:
+            return self._refuse_or(self.AUTO_BUSY)
         if action == "start":
             return self._refuse_or(self._start())
         if action in ("stop_success", "stop_fail"):
@@ -95,7 +103,42 @@ class RecordingService:
         return self._refuse_or(f"unknown action: {action}")
 
     def handle_reset(self) -> str | None:
+        if self._owner.is_auto:
+            return self._refuse_or(self.AUTO_BUSY)
         return self._refuse_or(self._reset())
+
+    # --- AUTO(4-1): 블록 리셋 직후에만 시작하고, 시작하면 "리셋 직후" 표시를 소비한다(녹화 시작과 같은 규칙) ---
+
+    def auto_precheck(self) -> str | None:
+        """AUTO를 시작할 수 있는가(상태를 바꾸지 않는다). 못 하면 이유."""
+        with self._lock:
+            if self.recorder.active:
+                return "녹화 중에는 AUTO를 시작할 수 없습니다"
+            if self._resetting or self._control.resetting:
+                return "블록 리셋이 진행 중입니다"
+            if not self._block_ready or self._current_seed is None:
+                return "블록 리셋을 먼저 하세요 (AUTO는 리셋 직후에만 시작할 수 있습니다)"
+            if seed_kind(self._current_seed) != DEMO:
+                return "AUTO는 시연 시드(0~99)의 블록에서만 시작할 수 있습니다(평가 시드는 막혀 있습니다)"
+        return None
+
+    def begin_auto(self) -> tuple[int | None, str | None]:
+        """AUTO 에피소드를 시작한다: (시드, None) 또는 (None, 거절 이유). 블록이 시드 위치에 그대로 있는지 다시 확인하고 "리셋 직후"를 소비한다."""
+        with self._lock:
+            reason = self.auto_precheck()
+            if reason is not None:
+                return None, reason
+            snapshot = self._worker.snapshot
+            if snapshot is None:
+                return None, "시뮬레이션이 아직 준비되지 않았습니다"
+            block_m = snapshot["block_m"]
+            seed_x, seed_y = block_xy_for_seed(self._current_seed)
+            off_m = float(((block_m[0] - seed_x) ** 2 + (block_m[1] - seed_y) ** 2) ** 0.5)
+            if off_m > config.RECORD_START_BLOCK_TOLERANCE_M:
+                self._block_ready = False
+                return None, f"블록이 시드 {self._current_seed} 위치에서 {off_m * 100:.1f} cm 벗어났습니다. 블록 리셋을 다시 하세요"
+            self._block_ready = False
+            return self._current_seed, None
 
     def _refuse_or(self, reason: str | None) -> str | None:
         if reason is not None:
