@@ -335,8 +335,8 @@ class SimWorker:
                 self._begin_auto(model, data, auto_cmd)
                 # 시작(렌더러 만들기, exact_start의 시간 되돌리기)에 걸린 시간과 시각 변화는 따라잡지 않는다: 시뮬레이션 시각 기준을 다시 잡는다.
                 offset_s = data.time - (time.monotonic() - wall_start_s)
-            # AUTO가 ctrl을 쓰는 동안(owner가 AUTO)은 ControlWorker가 정한 값을 적용하지 않는다.
-            if ctrl is not None and not self.owner.is_auto:
+            # ControlWorker가 정한 ctrl은 owner가 IDLE이거나 HUMAN일 때만 적용한다. AUTO(정책이 씀)와 HUMAN_WAIT(직전 ctrl 유지)에서는 적용하지 않는다.
+            if ctrl is not None and self.owner.control_writes_ctrl:
                 data.ctrl[:6] = ctrl
             target_sim_s = time.monotonic() - wall_start_s + offset_s
             # AUTO 중에는 따라잡기 상한을 줄인다: 렌더링 틱 정도의 지연만 따라잡고, 몰아서 돌지 않는다.

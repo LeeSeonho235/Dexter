@@ -24,9 +24,12 @@ import mujoco
 import numpy as np
 
 from server import auto_config, config
+from server import correction_config as cc
 from server import eval_config as ec
+from server.correction import CorrectionRecording, owner_time_s
+from server.correction_store import KIND_AUTO_ONLY, KIND_DISCARDED, CorrectionStore, CorrectionWriter
 from server.grid import grid_step_index, steps_done
-from server.owner import ControlOwner
+from server.owner import ControlOwner, Owner
 from server.policy_ipc import PolicyClient, PolicyError
 from server.seeds import DEMO, block_qpos_for_seed, seed_kind
 from server.success import QPOS_BLOCK_XYZ, QPOS_GRIPPER, SuccessHold, is_success
@@ -64,6 +67,10 @@ class AutoResult:
     tick_stats: dict | None = None
     qpos_trace: np.ndarray | None = None  # (n_samples, 13) 샘플마다 qpos(record_trace일 때. 평가 비교용)
     ctrl_trace: np.ndarray | None = None  # (n_samples - 1, 6) 샘플마다 낸 ctrl
+    # 교정(4-2): 샘플마다 (시각, qpos, 실제 적용된 ctrl, 주체)를 기록했을 때만 있다(record_samples=True). 저장 후보
+    recording: CorrectionRecording | None = None
+    end_reason: str = ""  # success | auto_limit | total_limit | user_stop | error
+    latencies: dict[str, list[float]] = field(default_factory=dict)  # 넘겨받기/돌려주기 요청 → 전환 지연(ms)
 
     @property
     def final_block_m(self) -> tuple[float, float, float]:
@@ -98,8 +105,31 @@ class AutoEpisode:
         exact_start: bool = False,
         record_trace: bool = False,
         on_finish: Callable[[AutoResult], None] | None = None,
+        owner: ControlOwner | None = None,
+        control=None,
+        hold_ctrl: Callable[[np.ndarray], None] | None = None,
+        record_samples: bool = False,
+        total_max_s: float = cc.TOTAL_MAX_S,
     ) -> None:
-        """policy: request(state float32[6], image uint8 HxWx3, reset: bool) -> ChunkResult 를 가진 객체(PolicyClient 또는 가짜)."""
+        """policy: request(state float32[6], image uint8 HxWx3, reset: bool) -> ChunkResult 를 가진 객체(PolicyClient 또는 가짜).
+
+        교정(4-2): owner를 주면 request_takeover()/request_handback()으로 AUTO → HUMAN_WAIT → HUMAN → AUTO 전환을 할 수 있다(전환은 이 에피소드가
+        시뮬레이션 스레드에서만 한다). control은 request_hold(ctrl)를 가진 ControlWorker, hold_ctrl은 SimWorker.set_ctrl(넘겨받는 순간 ctrl을 맞춘다).
+        record_samples=True면 샘플마다 (시각, qpos, 실제 적용 ctrl, 주체)를 모아 결과에 CorrectionRecording으로 담는다."""
+        self._owner = owner
+        self._control = control
+        self._hold_ctrl = hold_ctrl
+        self._total_n_max = int(round(total_max_s * fps))
+        self._rows: dict[str, list] | None = {"t": [], "qpos": [], "ctrl": [], "owner": []} if record_samples else None
+        self._takeover_req_s: float | None = None
+        self._handback_req_s: float | None = None
+        self._need_reset = False  # 돌려준 뒤 첫 정책 요청은 policy.reset()을 부르게 한다
+        self._auto_n = 0  # AUTO 주체로 행동을 낸 샘플 수(AUTO 시간 제한의 기준)
+        self._counts = {cc.OWNER_AUTO: 0, cc.OWNER_HUMAN: 0, cc.OWNER_HUMAN_WAIT: 0}
+        self._prev_code: int | None = None
+        self._interventions = 0
+        self._latencies: dict[str, list[float]] = {"takeover_request_to_wait_ms": [], "handback_request_to_auto_ms": []}
+        self._block_start_m = (0.0, 0.0, 0.0)
         self.seed = int(seed)
         self._policy = policy
         self._fps = fps
@@ -135,6 +165,42 @@ class AutoEpisode:
     def request_stop(self) -> None:
         self._stop.set()
 
+    def request_takeover(self) -> str | None:
+        """사람이 넘겨받기를 요청한다(Space, 버튼). 받아들였으면 None, 아니면 이유. 실제 전환은 시뮬레이션 스레드가 다음 물리 스텝 직전에 한다."""
+        with self._lock:
+            if self._owner is None or self._control is None:
+                return "이 에피소드는 넘겨받기를 지원하지 않습니다"
+            if not self.active:
+                return "AUTO가 실행 중이 아닙니다"
+            current = self._owner.current
+            if current is Owner.HUMAN_WAIT:
+                return "이미 손을 기다리는 중입니다"
+            if current is Owner.HUMAN:
+                return "이미 사람이 조종 중입니다"
+            if current is not Owner.AUTO:
+                return "AUTO가 실행 중이 아닙니다"
+            if self._takeover_req_s is not None:
+                return "이미 넘겨받기를 요청했습니다"
+            self._takeover_req_s = time.monotonic()
+            return None
+
+    def request_handback(self) -> str | None:
+        """사람이 정책에게 돌려준다(Space 한 번 더). HUMAN일 때만 받아들인다."""
+        with self._lock:
+            if self._owner is None:
+                return "이 에피소드는 돌려주기를 지원하지 않습니다"
+            if not self.active:
+                return "AUTO가 실행 중이 아닙니다"
+            current = self._owner.current
+            if current is Owner.HUMAN_WAIT:
+                return "아직 손을 기다리는 중입니다. 손을 보여 주어 조종을 시작한 뒤에 돌려줄 수 있습니다"
+            if current is not Owner.HUMAN:
+                return "사람이 조종 중이 아닙니다"
+            if self._handback_req_s is not None:
+                return "이미 돌려주기를 요청했습니다"
+            self._handback_req_s = time.monotonic()
+            return None
+
     def progress(self) -> dict[str, Any]:
         with self._lock:
             return dict(self._progress)
@@ -148,6 +214,7 @@ class AutoEpisode:
             apply_eval_start(model, data, self.seed)
         self._t0 = float(data.time)
         self._last_qpos = np.array(data.qpos[:13], dtype=np.float64)
+        self._block_start_m = tuple(float(v) for v in data.qpos[6:9])
         self._k = 0
         self._next_step = grid_step_index(0, self._fps, self._timestep_s)
         self._hold = SuccessHold()
@@ -160,6 +227,7 @@ class AutoEpisode:
         if self._stop.is_set():
             self._finish(data, "stopped")
             return False
+        self._process_transition_requests(data)
         if steps_done(float(data.time), self._t0, self._timestep_s) < self._next_step:
             return False
         try:
@@ -171,6 +239,71 @@ class AutoEpisode:
             self._finish(data, "error", f"{type(err).__name__}: {err}")
         return False
 
+    # --- 전환(시뮬레이션 스레드). 소유자는 이 에피소드가 정하고, HUMAN_WAIT → HUMAN만 ControlWorker가 손 3프레임을 보고 정한다 ---
+
+    def _owner_code(self) -> int:
+        current = self._owner.current if self._owner is not None else Owner.AUTO
+        if current is Owner.HUMAN:
+            return cc.OWNER_HUMAN
+        if current is Owner.HUMAN_WAIT:
+            return cc.OWNER_HUMAN_WAIT
+        return cc.OWNER_AUTO
+
+    def _process_transition_requests(self, data: mujoco.MjData) -> None:
+        if self._owner is None:
+            return
+        current = self._owner.current
+        if self._takeover_req_s is not None:
+            if current is Owner.AUTO:
+                self._do_takeover(data)
+            else:
+                self._takeover_req_s = None  # 그 사이 상황이 바뀌었다
+        if self._handback_req_s is not None:
+            if current is Owner.HUMAN:
+                self._do_handback(data)
+            else:
+                self._handback_req_s = None  # HUMAN이 아니게 된 사이에 온 요청은 버린다
+
+    def _do_takeover(self, data: mujoco.MjData) -> None:
+        """AUTO → HUMAN_WAIT. 로봇은 직전 ctrl 그대로 멈춘다. 정책 호출은 이미 끝나 있고(같은 스레드), 대기 중인 청크 큐는 버린다.
+        ControlWorker와 SimWorker가 같은 ctrl을 갖게 한 뒤에 소유자를 바꾼다(낡은 ctrl이 덮어쓰지 않게)."""
+        assert self._owner is not None
+        self._queue.clear()
+        ctrl = np.array(data.ctrl[:6], dtype=np.float64)
+        if self._control is not None:
+            self._control.request_hold(ctrl)
+        if self._hold_ctrl is not None:
+            self._hold_ctrl(ctrl)
+        requested = self._takeover_req_s
+        if self._owner.transition(Owner.AUTO, Owner.HUMAN_WAIT):
+            self._takeover_req_s = None
+            if requested is not None:
+                self._latencies["takeover_request_to_wait_ms"].append((time.monotonic() - requested) * 1000.0)
+
+    def _do_handback(self, data: mujoco.MjData) -> None:
+        """HUMAN → AUTO. 청크 큐를 비우고, 다음 샘플에서 새 관측으로 정책에 요청한다(reset=True: policy.reset())."""
+        assert self._owner is not None
+        self._queue.clear()
+        self._need_reset = True
+        requested = self._handback_req_s
+        if self._owner.transition(Owner.HUMAN, Owner.AUTO):
+            self._handback_req_s = None
+            if requested is not None:
+                self._latencies["handback_request_to_auto_ms"].append((time.monotonic() - requested) * 1000.0)
+
+    def _append_row(self, data: mujoco.MjData, qpos: np.ndarray, code: int) -> None:
+        """샘플 한 개를 기록한다: qpos(행동 적용 전)와 지금 data.ctrl(실제로 적용 중인 값)을 같은 순간에 복사한다."""
+        self._counts[code] += 1
+        if code == cc.OWNER_HUMAN and self._prev_code != cc.OWNER_HUMAN:
+            self._interventions += 1
+        self._prev_code = code
+        if self._rows is None:
+            return
+        self._rows["t"].append(float(data.time))
+        self._rows["qpos"].append(qpos)
+        self._rows["ctrl"].append(np.array(data.ctrl[:ARM_DOF], dtype=np.float64))
+        self._rows["owner"].append(code)
+
     def _sample(self, data: mujoco.MjData) -> bool:
         k = self._k
         qpos = np.array(data.qpos[:13], dtype=np.float64)  # 복사
@@ -178,52 +311,95 @@ class AutoEpisode:
         self._last_qpos, self._last_sim_s = qpos, sim_s
         if self._record_trace:
             self._trace.append(qpos)
+        code = self._owner_code()
+        # 성공 판정은 AUTO, HUMAN_WAIT, HUMAN 모두에서 돈다
         if self._hold.update(sim_s, is_success(qpos[QPOS_BLOCK_XYZ], float(qpos[QPOS_GRIPPER]))) and self._time_to_success is None:
             self._time_to_success = sim_s
-            self._finish(data, "success")
+            self._append_row(data, qpos, code)
+            self._finish(data, "success", end_reason="success")
             return False
-        if k == self._n_max:
-            self._finish(data, "timeout")
+        # AUTO 시간 제한은 AUTO 주체로 보낸 샘플만 센다(손을 기다린 시간과 사람 시간은 뺀다). 순수 AUTO에서는 예전과 같다.
+        if code == cc.OWNER_AUTO and self._auto_n >= self._n_max:
+            self._append_row(data, qpos, code)
+            self._finish(data, "timeout", end_reason="auto_limit")
+            return False
+        if k >= self._total_n_max:
+            self._append_row(data, qpos, code)
+            self._finish(data, "timeout", end_reason="total_limit")
             return False
 
         blocked = False
         latency_ms = None
-        if not self._queue:
-            blocked = True
-            wall0 = time.perf_counter()
-            image = self._renderer.render(qpos)
-            render_ms = (time.perf_counter() - wall0) * 1000.0
-            result = self._policy.request(qpos[:ARM_DOF].astype(np.float32), image, reset=(self._calls == 0))
-            stall_ms = (time.perf_counter() - wall0) * 1000.0
-            self._calls += 1
-            actions = np.asarray(result.actions, dtype=np.float64)
-            self._queue.extend(actions)
-            self._chunk_len = len(actions)
-            latency_ms = render_ms + result.total_ms
-            self._requests.append(
-                {"render_ms": render_ms, "request_ms": result.total_ms, "infer_ms": result.infer_ms, "stall_ms": stall_ms}
-            )
-        action = self._queue.popleft()
-        if action.shape[0] < ARM_DOF or not np.all(np.isfinite(action[:ARM_DOF])):
-            raise PolicyError("정책이 잘못된 행동을 냈습니다")
-        data.ctrl[:ARM_DOF] = action[:ARM_DOF]
-        if self._record_trace:
-            self._ctrls.append(action[:ARM_DOF].copy())
+        if code == cc.OWNER_AUTO:
+            if not self._queue:
+                blocked = True
+                wall0 = time.perf_counter()
+                image = self._renderer.render(qpos)
+                render_ms = (time.perf_counter() - wall0) * 1000.0
+                result = self._policy.request(qpos[:ARM_DOF].astype(np.float32), image, reset=(self._calls == 0 or self._need_reset))
+                self._need_reset = False
+                stall_ms = (time.perf_counter() - wall0) * 1000.0
+                self._calls += 1
+                actions = np.asarray(result.actions, dtype=np.float64)
+                latency_ms = render_ms + result.total_ms
+                self._requests.append(
+                    {"render_ms": render_ms, "request_ms": result.total_ms, "infer_ms": result.infer_ms, "stall_ms": stall_ms}
+                )
+                if self._takeover_req_s is not None and self._owner is not None:
+                    # 정책을 기다리는 동안 넘겨받기를 눌렀다: 받아 온 청크는 통째로 버리고 직전 ctrl을 유지한 채 손을 기다린다
+                    self._process_transition_requests(data)
+                    code = self._owner_code()
+                else:
+                    self._queue.extend(actions)
+                    self._chunk_len = len(actions)
+            if code == cc.OWNER_AUTO:
+                action = self._queue.popleft()
+                if action.shape[0] < ARM_DOF or not np.all(np.isfinite(action[:ARM_DOF])):
+                    raise PolicyError("정책이 잘못된 행동을 냈습니다")
+                data.ctrl[:ARM_DOF] = action[:ARM_DOF]
+                if self._record_trace:
+                    self._ctrls.append(action[:ARM_DOF].copy())
+                self._auto_n += 1
+        # HUMAN, HUMAN_WAIT 샘플: ctrl을 쓰지 않는다. data.ctrl은 사람의 ctrl(HUMAN) 또는 직전 값(HUMAN_WAIT) 그대로다.
+        self._append_row(data, qpos, code)
         self._k = k + 1
         self._next_step = grid_step_index(self._k, self._fps, self._timestep_s)
         with self._lock:
             self._progress.update(
-                sample=k, elapsed_s=sim_s, chunk_pos=self._chunk_len - len(self._queue) - 1, chunk_len=self._chunk_len
+                sample=k, elapsed_s=sim_s,
+                chunk_pos=(self._chunk_len - len(self._queue) - 1) if code == cc.OWNER_AUTO else None,
+                chunk_len=self._chunk_len if code == cc.OWNER_AUTO else None,
+                owner=("HUMAN" if code == cc.OWNER_HUMAN else "HUMAN_WAIT" if code == cc.OWNER_HUMAN_WAIT else "AUTO"),
+                auto_s=self._counts[cc.OWNER_AUTO] / self._fps, human_s=self._counts[cc.OWNER_HUMAN] / self._fps,
+                wait_s=self._counts[cc.OWNER_HUMAN_WAIT] / self._fps, total_s=(k + 1) / self._fps, interventions=self._interventions,
             )
             if latency_ms is not None:
                 self._progress["last_latency_ms"] = latency_ms
         return blocked
 
-    def _finish(self, data: mujoco.MjData, outcome: str, error: str = "") -> None:
+    def _build_recording(self, outcome: str, end_reason: str, error: str) -> CorrectionRecording | None:
+        if self._rows is None or not self._rows["t"]:
+            return None
+        return CorrectionRecording(
+            seed=self.seed,
+            block_start_m=self._block_start_m,
+            sim_time_s=np.array(self._rows["t"], dtype=np.float64),
+            qpos=np.array(self._rows["qpos"], dtype=np.float64),
+            ctrl=np.array(self._rows["ctrl"], dtype=np.float64),
+            owner=np.array(self._rows["owner"], dtype=np.int8),
+            outcome=outcome,
+            end_reason=end_reason,
+            time_to_success_s=self._time_to_success,
+            error=error,
+            fps=float(self._fps),
+        )
+
+    def _finish(self, data: mujoco.MjData, outcome: str, error: str = "", end_reason: str = "") -> None:
         if not self.active:
             return
         self.active = False
         qpos = self._last_qpos
+        end_reason = end_reason or {"stopped": "user_stop", "error": "error"}.get(outcome, outcome)
         result = AutoResult(
             outcome=outcome,
             seed=self.seed,
@@ -237,6 +413,9 @@ class AutoEpisode:
             requests=list(self._requests),
             qpos_trace=np.array(self._trace) if self._record_trace else None,
             ctrl_trace=np.array(self._ctrls) if self._record_trace else None,
+            recording=self._build_recording(outcome, end_reason, error),
+            end_reason=end_reason,
+            latencies={key: list(values) for key, values in self._latencies.items()},
         )
         self.result = result
         try:
@@ -262,6 +441,7 @@ class AutoRunner:
         arm_check: Callable[[], str | None] | None = None,
         max_s: float = auto_config.AUTO_MAX_S,
         load_estimate_s: float = auto_config.POLICY_LOAD_ESTIMATE_S,
+        store: CorrectionStore | None = None,
     ) -> None:
         self._worker = worker
         self._owner = owner
@@ -285,6 +465,23 @@ class AutoRunner:
         self._launcher_thread: threading.Thread | None = None
         self._last_event: dict[str, Any] | None = None
         self._event_id = 0
+        # 교정(4-2): 끝난 에피소드에 사람 구간이 있으면 사용자가 저장/버리기를 고를 때까지 메모리에 들고 있는다(고르기 전에는 저장하지 않는다)
+        self._store = store
+        self._pending: CorrectionRecording | None = None
+        self._last_counts: dict[str, Any] | None = None  # 끝난 에피소드의 시간·개입 횟수(화면 표시용)
+        self._corr_saved = 0
+        self._corr_saved_human_s = 0.0
+        self._corr_save_errors = 0
+        self._last_saved: dict[str, Any] | None = None
+        self._writer: CorrectionWriter | None = None
+        if store is not None:
+            for meta in store.scan():
+                self._corr_saved += 1
+                self._corr_saved_human_s += float(meta.get("human_time_s", 0.0))
+            self._writer = CorrectionWriter(
+                store, on_saved=self._on_correction_saved, on_failed=self._on_correction_failed, on_csv_failed=self._on_csv_failed
+            )
+            self._writer.start()
 
     # --- 브라우저 명령. 돌려주는 값: None이면 받아들임, 문자열이면 거절 이유 ---
 
@@ -295,16 +492,71 @@ class AutoRunner:
             reason = self.handle_stop()
         elif action == "shutdown_policy":
             reason = self.handle_shutdown_policy()
+        elif action == "takeover":
+            reason = self.handle_takeover()
+        elif action == "handback":
+            reason = self.handle_handback()
+        elif action == "save_correction":
+            reason = self.handle_decision(save=True)
+        elif action == "discard_correction":
+            reason = self.handle_decision(save=False)
         else:
             reason = f"unknown action: {action}"
         if reason is not None:
             self._event("warn", f"거절됨: {reason}")  # 화면의 AUTO 상자에 이유가 보이게(녹화 상자와 같은 방식)
         return reason
 
+    def _running_episode(self) -> tuple[AutoEpisode | None, str | None]:
+        with self._lock:
+            if self._status is not AutoStatus.RUNNING or self._episode is None:
+                return None, "AUTO가 실행 중이 아닙니다"
+            return self._episode, None
+
+    def handle_takeover(self) -> str | None:
+        episode, reason = self._running_episode()
+        return reason if episode is None else episode.request_takeover()
+
+    def handle_handback(self) -> str | None:
+        episode, reason = self._running_episode()
+        return reason if episode is None else episode.request_handback()
+
+    def handle_decision(self, *, save: bool) -> str | None:
+        """끝난 에피소드의 교정을 저장하거나 버린다. 고르기 전에는 아무것도 저장하지 않는다."""
+        with self._lock:
+            if self._pending is None or self._writer is None:
+                return "저장하거나 버릴 교정이 없습니다"
+            rec, self._pending = self._pending, None
+        if save:
+            self._event("info", f"교정 저장 중: 시드 {rec.seed}")
+            self._writer.submit_save(rec)
+        else:
+            self._writer.submit_csv(rec, KIND_DISCARDED)
+            self._event("info", f"교정을 버렸습니다 (저장 안 됨): 시드 {rec.seed}")
+        return None
+
+    def _on_correction_saved(self, rec: CorrectionRecording, meta: dict[str, Any]) -> None:
+        with self._lock:
+            self._corr_saved += 1
+            self._corr_saved_human_s += float(meta["human_time_s"])
+            self._last_saved = {"index": meta["episode_index"], "seed": meta["seed"], "human_time_s": meta["human_time_s"], "interventions": meta["intervention_count"]}
+        self._event(
+            "info", f"교정 {meta['episode_index']}번 저장됨 (시드 {meta['seed']}, 사람 {meta['human_time_s']:.1f}초, 개입 {meta['intervention_count']}번)"
+        )
+
+    def _on_correction_failed(self, rec: CorrectionRecording, error: str) -> None:
+        with self._lock:
+            self._corr_save_errors += 1
+        self._event("error", f"교정 저장 실패(시드 {rec.seed}): {error}. 저장된 것으로 세지 않았습니다. 디스크 공간과 폴더 권한을 확인하세요")
+
+    def _on_csv_failed(self, rec: CorrectionRecording, error: str) -> None:
+        self._event("error", f"auto_runs.csv에 기록하지 못했습니다(시드 {rec.seed}): {error}")
+
     def handle_start(self) -> str | None:
         with self._lock:
             if self._status in (AutoStatus.LOADING, AutoStatus.RUNNING):
                 return "AUTO가 이미 실행 중입니다"
+            if self._pending is not None:
+                return "먼저 지난 교정을 저장할지 버릴지 고르세요"
             reason = self._recording.auto_precheck()
             if reason is None and self._arm_check is not None:
                 reason = self._arm_check()
@@ -314,6 +566,7 @@ class AutoRunner:
                 return "지금은 다른 주체가 로봇을 제어 중입니다"
             self._status = AutoStatus.LOADING
             self._cancel.clear()
+            self._last_counts = None
             self._error = ""
             self._result = None
             self._episode = None
@@ -358,6 +611,14 @@ class AutoRunner:
         if thread is not None:
             thread.join(5.0)
         self._policy.shutdown()
+        with self._lock:
+            self._pending = None  # 고르지 않은 교정은 저장하지 않고 버린다(서버를 끄면 사라진다)
+        if self._writer is not None:
+            self._writer.close()
+
+    def has_pending_decision(self) -> bool:
+        with self._lock:
+            return self._pending is not None
 
     # --- 정책 프로세스 시작과 에피소드 맡기기 (스레드) ---
 
@@ -377,7 +638,11 @@ class AutoRunner:
         if reason is not None or seed is None:
             self._abort(AutoStatus.ERROR, reason or "시드를 정하지 못했습니다", f"AUTO를 시작하지 못했습니다: {reason}")
             return
-        episode = AutoEpisode(seed, self._policy, max_s=self._max_s, on_finish=self._on_finished)
+        episode = AutoEpisode(
+            seed, self._policy, max_s=self._max_s, on_finish=self._on_finished,
+            owner=self._owner, control=self._control if hasattr(self._control, "request_hold") else None,
+            hold_ctrl=self._worker.set_ctrl, record_samples=self._store is not None,
+        )
         with self._lock:
             self._episode = episode
             self._seed = seed
@@ -403,9 +668,18 @@ class AutoRunner:
         self._worker.set_ctrl(result.final_ctrl)
         if self._control is not None and hasattr(self._control, "request_adopt"):
             self._control.request_adopt(result.final_ctrl)
-        self._owner.release_auto()
+        self._owner.release_to_idle()  # 끝난 순간 주체가 AUTO, HUMAN_WAIT, HUMAN 무엇이든 IDLE로
         status = AutoStatus(result.outcome)
+        rec = result.recording
         with self._lock:
+            if rec is not None and self._writer is not None:
+                self._last_counts = {**owner_time_s(rec.owner, rec.fps), "interventions": rec.intervention_count}
+                if rec.human_samples > 0 and rec.n_ticks >= 2:
+                    self._pending = rec  # 사용자가 저장/버리기를 고르기 전에는 저장하지 않는다
+                else:
+                    self._writer.submit_csv(rec, KIND_AUTO_ONLY)  # 순수 AUTO: 메타 한 줄만
+            elif rec is not None:
+                self._last_counts = {**owner_time_s(rec.owner, rec.fps), "interventions": rec.intervention_count}
             self._status = status
             self._error = result.error
             if status in (AutoStatus.SUCCESS, AutoStatus.TIMEOUT):
@@ -418,6 +692,8 @@ class AutoRunner:
             "stopped": f"중지했습니다: 시드 {result.seed}, {result.time_s:.1f}초",
             "error": f"오류로 멈췄습니다: {result.error}",
         }[result.outcome]
+        if self.has_pending_decision():
+            text += " — 사람이 고친 구간이 있습니다. \"교정 저장\" 또는 \"버리기\"를 고르세요"
         self._event("error" if result.outcome == "error" else "info", text)
         if result.outcome != "error":
             # 유휴 종료 타이머를 지금부터 다시 잰다(느린 일이라 시뮬레이션 스레드 밖에서).
@@ -441,9 +717,39 @@ class AutoRunner:
             if status is AutoStatus.LOADING and self._loading_since_s is not None:
                 loading_s = time.monotonic() - self._loading_since_s
             load_s = policy.get("load_s")
+            running = status is AutoStatus.RUNNING
+            counts = self._last_counts or {}
+            seed_info = self._recording.seed_info() if hasattr(self._recording, "seed_info") else {}
+            pending = self._pending
             return {
                 "status": status.value,
                 "owner": self._owner.current.value,
+                # 교정(4-2): 지금 제어 주체와 시간(AUTO 시간은 45초 제한의 기준, 사람 시간은 HUMAN 구간만)
+                "auto_s": progress.get("auto_s") if running else counts.get("auto_time_s"),
+                "human_s": progress.get("human_s") if running else counts.get("human_time_s"),
+                "wait_s": progress.get("wait_s") if running else counts.get("human_wait_time_s"),
+                "total_s": progress.get("total_s") if running else counts.get("total_s"),
+                "total_max_s": cc.TOTAL_MAX_S,
+                "interventions": progress.get("interventions") if running else counts.get("interventions"),
+                "correction": {
+                    "pending": None
+                    if pending is None
+                    else {
+                        "seed": pending.seed,
+                        "outcome": pending.outcome,
+                        "end_reason": pending.end_reason,
+                        "human_time_s": round(owner_time_s(pending.owner, pending.fps)["human_time_s"], 2),
+                        "interventions": pending.intervention_count,
+                    },
+                    "saved_count": self._corr_saved,
+                    "saved_human_s": round(self._corr_saved_human_s, 1),
+                    "save_error_count": self._corr_save_errors,
+                    "last_saved": self._last_saved,
+                },
+                "ready_seed": seed_info.get("ready_seed"),
+                "ready_seed_purpose": cc.purpose_for_seed(seed_info.get("ready_seed")),
+                "next_seed": seed_info.get("next_seed"),
+                "next_seed_purpose": cc.purpose_for_seed(seed_info.get("next_seed")),
                 "seed": self._seed,
                 "elapsed_s": progress.get("elapsed_s") if status is AutoStatus.RUNNING else (self._result or {}).get("time_s"),
                 "max_s": self._max_s,

@@ -27,7 +27,7 @@ HEIGHT_FIELDS = frozenset({"type", "dir", "slow"})
 HEIGHT_DIRECTIONS = (-1, 0, 1)
 RECORD_ACTIONS = ("start", "stop_success", "stop_fail", "discard", "delete_last")
 RESET_FIELDS = frozenset({"type"})
-AUTO_ACTIONS = ("start", "stop", "shutdown_policy")
+AUTO_ACTIONS = ("start", "stop", "shutdown_policy", "takeover", "handback", "save_correction", "discard_correction")
 AUTO_FIELDS = frozenset({"type", "action"})
 
 
@@ -152,8 +152,9 @@ def validate_reset(msg: dict[str, Any]) -> dict[str, Any]:
 
 
 def validate_auto(msg: dict[str, Any]) -> dict[str, Any]:
-    """AUTO 명령: {"type":"auto","action":"start"|"stop"|"shutdown_policy"}. shutdown_policy는 정책 프로세스를 지금 끄는 버튼이다.
-    그 외의 값과 다른 필드는 모두 거부한다(안전: 잘못된 값으로 로봇이 움직이면 안 된다)."""
+    """AUTO 명령: {"type":"auto","action":"start"|"stop"|"shutdown_policy"|"takeover"|"handback"|"save_correction"|"discard_correction"}.
+    shutdown_policy는 정책 프로세스를 지금 끄는 버튼, takeover/handback은 사람이 넘겨받고 돌려주는 것(Space), save_correction/discard_correction은
+    끝난 교정을 저장하거나 버리는 선택이다. 그 외의 값과 다른 필드는 모두 거부한다(안전: 잘못된 값으로 로봇이 움직이면 안 된다)."""
     _check_fields(msg, AUTO_FIELDS)
     action = msg["action"]
     if not isinstance(action, str) or action not in AUTO_ACTIONS:

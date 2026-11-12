@@ -24,11 +24,13 @@ from collections.abc import Callable
 import numpy as np
 
 from server import config
+from server import correction_config as cc
+from server.correction import HandoffGripper
 from server.gripper import GripperLatch
 from server.height import HeightCommands
 from server.ik import ArmIK, limit_joint_step
 from server.mapping import HandMapper
-from server.owner import ControlOwner
+from server.owner import ControlOwner, Owner
 from server.reset import BlockReset, ResetAction
 from server.sim_worker import SimWorker
 
@@ -86,6 +88,10 @@ class ControlWorker:
         # 제어 주체(server/owner.py). 기본은 시뮬레이션이 가진 것(SimWorker.owner), 없으면 항상 IDLE인 새 것.
         self._owner = owner or getattr(sim, "owner", None) or ControlOwner()
         self._adopt_ctrl: np.ndarray | None = None  # AUTO가 끝나며 넘겨 준 마지막 ctrl(제어 스레드가 다음 틱에 이어받는다)
+        # 교정(4-2): 사람이 넘겨받는 중. request_hold가 넣은 ctrl(AUTO가 멈춘 자리)을 HUMAN_WAIT가 되면 제어 스레드가 이어받는다.
+        self._hold_request: np.ndarray | None = None
+        self._human_session = False  # HUMAN_WAIT 또는 HUMAN 동안 True(상대 이동 매퍼와 집게 일치 판정을 쓰는 중)
+        self.human_started_monotonic: float | None = None  # 마지막으로 HUMAN_WAIT → HUMAN이 된 시각(시계 기준). 측정용
         self._ik_factory = ik_factory
         # 설정값 MAPPING_MODE(기본 "relative"), Z_FROM_HAND_SCALE(기본 False: 높이는 키보드)을 여기서 넘긴다.
         # HandMapper 자체의 기본값은 "absolute"와 z_from_hand_scale=True(2-2, 2-4 동작)다.
@@ -194,6 +200,13 @@ class ControlWorker:
             self._adopt_ctrl = np.array(ctrl, dtype=float)
         self._wake.set()
 
+    def request_hold(self, ctrl: np.ndarray) -> None:
+        """사람이 넘겨받으려 한다(AUTO → HUMAN_WAIT). AUTO가 멈춘 자리의 ctrl을 넘긴다. 소유자가 HUMAN_WAIT가 되면 제어 스레드가
+        이 값으로 ctrl을 맞추고, 이전 목표·필터를 지우고, 조종 손이 3프레임 연속 보이기를 기다린다. 다른 스레드에서 불러도 된다."""
+        with self._lock:
+            self._hold_request = np.array(ctrl, dtype=float)
+        self._wake.set()
+
     def park_ctrl(self) -> np.ndarray:
         """home 자세 + 집게 열림(리셋이 끝나는 자세). prepare() 뒤에 쓸 수 있다."""
         return self._park_ctrl()
@@ -251,7 +264,14 @@ class ControlWorker:
                 "tip_m": _round_list(tip_m),
                 "error_m": None if error_m is None else round(error_m, 4),
                 "gripper_closed": self._gripper.closed,
-                "gripper_goal_rad": round(_gripper_goal_rad(self._gripper.closed), 3),
+                "gripper_goal_rad": round(self._gripper_goal(), 3),
+                # 넘겨받기(4-2): 사람이 조종하는 중인가, 집게를 로봇에 맞추기를 기다리는 중인가(waiting이면 화면에 안내를 띄운다)
+                "human_session": self._human_session,
+                "gripper_sync": {
+                    "active": self._human_session,
+                    "waiting": bool(self._human_session and getattr(self._gripper, "waiting", False)),
+                    "robot_closed": getattr(self._gripper, "robot_closed", None) if self._human_session else None,
+                },
                 "gripper_rad": None if joints_rad is None else round(float(joints_rad[5]), 3),
                 "ctrl_rad": _round_list(self._ctrl, 3),
                 "ik_fail_count": self._ik_fail_count,
@@ -363,7 +383,67 @@ class ControlWorker:
             self._target_m = None
             self._reference_hand = None
             self._samples.clear()
+            self._human_session = False
         self._last_step_s = None
+
+    def _gripper_goal(self) -> float:
+        """집게 ctrl 목표(rad). 넘겨받은 직후 아직 사용자의 pinch가 로봇 상태와 일치하지 않았으면 AUTO가 낸 값을 그대로 둔다."""
+        hold = getattr(self._gripper, "hold_rad", None)
+        return hold if hold is not None else _gripper_goal_rad(self._gripper.closed)
+
+    def _begin_human_wait(self, hold_ctrl: np.ndarray) -> None:
+        """HUMAN_WAIT 시작: ctrl을 AUTO가 멈춘 값으로 맞추고, 항상 상대 이동(클러치) 매퍼와 집게 일치 판정으로 새로 시작한다.
+        현재 설정(MAPPING_MODE)은 보지 않는다. 로봇 쪽 기준점은 3프레임이 찰 때의 실제 집게 끝(gripperframe)이다(_tick_wait)."""
+        with self._lock:
+            self._height.reset()  # 대기 시작 틱에 막 도착한 손 프레임(_pending)은 지우지 않는다: 첫 프레임부터 3프레임에 센다
+            self._goal_arm_rad = None
+            self._controlling = False
+            self._consecutive = 0
+            self._target_m = None
+            self._reference_hand = None
+            self._samples.clear()
+            self._ctrl = np.array(hold_ctrl, dtype=float)
+            self._human_session = True
+        self._ctrl_published = True  # SimWorker도 같은 값을 이미 갖고 있다(AutoEpisode가 set_ctrl로 넘김)
+        self._last_step_s = None
+        self._mapper = HandMapper(mode="relative", z_from_hand_scale=config.Z_FROM_HAND_SCALE)
+        self._gripper = HandoffGripper(float(hold_ctrl[ARM_DOF]), config.PINCH_CLOSE_BELOW, config.PINCH_OPEN_ABOVE)
+
+    def _tick_wait(self) -> None:
+        """HUMAN_WAIT 한 틱: ctrl은 쓰지 않는다(로봇은 그 자리에 멈춰 있다). 손이 3프레임 연속 보이면 그 순간의 손 위치를 기준점으로 잡고
+        HUMAN으로 넘어간다. 로봇 쪽 기준은 작업 상자 중심이 아니라 지금 실제 집게 끝 위치다(그래야 넘겨받는 순간 튀지 않는다)."""
+        assert self._ik is not None
+        with self._lock:
+            hold, self._hold_request = self._hold_request, None
+        if hold is not None:
+            self._begin_human_wait(hold)
+        if not self._human_session:
+            return
+        with self._lock:
+            pending, self._pending = self._pending, None
+            self._height.reset()
+        snapshot = self._sim.snapshot
+        if snapshot is None:
+            return
+        tip_m = np.asarray(snapshot["tip_m"], dtype=float)
+        self._mapper.start_position_m = (float(tip_m[0]), float(tip_m[1]), float(tip_m[2]))
+        if pending is None:
+            return
+        hand, recv_s = pending
+        changed = self._on_new_hand(hand, recv_s)
+        if not self._controlling:
+            return
+        # 조종 시작 조건(3프레임 연속)을 채웠다. IK를 지금 관절 각도에서 시작하게 한 뒤(기본 시작 자세로 되돌리면 같은 집게 끝 위치라도
+        # 다른 관절 조합이 나와 팔이 휜다) 소유자를 HUMAN으로 바꾼다.
+        if cc.HUMAN_IK_WARM_START:
+            self._ik.set_arm(np.asarray(snapshot["joints_rad"][:ARM_DOF], dtype=float))
+        else:
+            self._ik.reset()
+        if not self._owner.transition(Owner.HUMAN_WAIT, Owner.HUMAN):
+            return  # 그 사이 에피소드가 끝났거나 중지됐다
+        self.human_started_monotonic = self._clock()
+        solved = self._solve_goal(self._mapper.last_target_m) if changed else False
+        self._step_ctrl(recv_s if solved else None)
 
     def tick(self) -> None:
         """한 틱: 새 hand 메시지 처리 → ctrl 한 걸음. 스레드가 메시지가 올 때와 CONTROL_HZ 주기로 부른다."""
@@ -380,6 +460,12 @@ class ControlWorker:
                 self._pending = None
                 self._height.reset()
             self._last_step_s = None
+            if self._human_session:
+                # 사람이 정책에게 돌려줬다: 상대 이동 매퍼와 집게 일치 판정을 지운다(다음 넘겨받기는 처음부터)
+                self._clear_hand_state()
+            return
+        if self._owner.current is Owner.HUMAN_WAIT:
+            self._tick_wait()
             return
         with self._lock:
             request, self._reset_request = self._reset_request, None
@@ -481,7 +567,7 @@ class ControlWorker:
             self._ctrl[:ARM_DOF], self._goal_arm_rad, config.MAX_JOINT_STEP_RAD * scale
         )
         new_ctrl[ARM_DOF] = limit_joint_step(
-            self._ctrl[ARM_DOF], _gripper_goal_rad(self._gripper.closed), config.MAX_GRIPPER_STEP_RAD * scale
+            self._ctrl[ARM_DOF], self._gripper_goal(), config.MAX_GRIPPER_STEP_RAD * scale
         )
         if not np.all(np.isfinite(new_ctrl)):
             raise ValueError("ctrl is not finite")

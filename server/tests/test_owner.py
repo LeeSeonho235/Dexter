@@ -6,27 +6,37 @@ import numpy as np
 
 from server import config
 from server.control import ControlWorker
-from server.owner import ALLOWED_TRANSITIONS, FUTURE_TRANSITIONS, ControlOwner, Owner
+from server.owner import ALLOWED_TRANSITIONS, REFUSED_TRANSITIONS, ControlOwner, Owner
 
 
-def test_starts_idle_and_allows_only_idle_auto_transitions():
+def test_starts_idle_and_idle_auto_transitions():
     owner = ControlOwner()
     assert owner.current is Owner.IDLE and not owner.is_auto
-    assert ALLOWED_TRANSITIONS.isdisjoint(FUTURE_TRANSITIONS)
+    assert ALLOWED_TRANSITIONS.isdisjoint(REFUSED_TRANSITIONS)
     assert owner.try_acquire_auto() and owner.is_auto and owner.current is Owner.AUTO
     assert not owner.try_acquire_auto()  # 이미 AUTO
     assert owner.release_auto() and owner.current is Owner.IDLE
     assert not owner.release_auto()
 
 
-def test_human_transitions_are_reserved_but_refused():
+def test_human_transitions_follow_the_4_2_rules():
+    """4-2: AUTO → HUMAN_WAIT → HUMAN → AUTO(돌려주기)만 허용하고, 건너뛰기와 거꾸로 가기는 모두 거부한다(이전에는 HUMAN 전환 전부 거부)."""
     owner = ControlOwner()
-    for expected, new in FUTURE_TRANSITIONS:
+    for expected, new in REFUSED_TRANSITIONS:
         assert not owner.transition(expected, new)
     assert owner.current is Owner.IDLE
+    assert not owner.transition(Owner.IDLE, Owner.HUMAN_WAIT)  # IDLE에서 바로 넘겨받기는 안 된다
     assert owner.try_acquire_auto()
-    assert not owner.transition(Owner.AUTO, Owner.HUMAN)  # 4-2에서 켠다
+    assert not owner.transition(Owner.AUTO, Owner.HUMAN)  # 손을 기다리는 단계를 건너뛸 수 없다
     assert owner.current is Owner.AUTO
+    assert owner.transition(Owner.AUTO, Owner.HUMAN_WAIT) and owner.is_busy and not owner.control_writes_ctrl
+    assert not owner.transition(Owner.HUMAN_WAIT, Owner.AUTO)  # 대기에서 AUTO로 곧장 돌아갈 수 없다
+    assert owner.transition(Owner.HUMAN_WAIT, Owner.HUMAN) and owner.control_writes_ctrl
+    assert not owner.transition(Owner.HUMAN, Owner.HUMAN_WAIT)
+    assert owner.transition(Owner.HUMAN, Owner.AUTO) and owner.is_auto
+    assert owner.transition(Owner.AUTO, Owner.HUMAN_WAIT)
+    assert owner.release_to_idle() and owner.current is Owner.IDLE and not owner.is_busy  # 끝나면 어디서든 IDLE
+    assert not owner.release_to_idle()
 
 
 def test_only_one_thread_wins_the_acquire():

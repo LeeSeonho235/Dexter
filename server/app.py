@@ -32,7 +32,10 @@ import numpy as np  # noqa: E402
 
 from server import auto_config, config  # noqa: E402
 from server.auto import AutoRunner  # noqa: E402
+from pathlib import Path  # noqa: E402
+
 from server.control import ControlWorker  # noqa: E402
+from server.correction_store import CorrectionStore  # noqa: E402
 from server.episode_store import EpisodeStore  # noqa: E402
 from server.owner import ControlOwner  # noqa: E402
 from server.policy_ipc import PolicyClient  # noqa: E402
@@ -97,13 +100,17 @@ class Hub:
 
 
 def create_app(
-    worker_factory=None, *, record_dir=None, record_max_s=None, record_store=None, policy_client=None, auto_max_s=None
+    worker_factory=None, *, record_dir=None, record_max_s=None, record_store=None, policy_client=None, auto_max_s=None,
+    correction_dir=None, correction_store=None,
 ) -> FastAPI:
     """worker_factory(on_frame) -> SimWorker. 테스트에서 바꿔 끼울 수 있게 둔다.
     record_dir: 에피소드 저장 폴더(기본 config.RECORD_DIR). record_max_s: 최대 길이(기본 config.RECORD_MAX_S).
     record_store: 저장소 자체를 바꿔 끼울 때(테스트에서 쓰기 실패를 흉내 낼 때).
     policy_client: AUTO가 쓰는 정책 클라이언트(기본: train/.venv의 정책 프로세스를 AUTO 첫 시작 때 띄우는 PolicyClient). 테스트에서 가짜로 바꾼다.
-    auto_max_s: AUTO 최대 시간(기본 server/auto_config.py AUTO_MAX_S)."""
+    auto_max_s: AUTO 최대 시간(기본 server/auto_config.py AUTO_MAX_S).
+    correction_dir: 교정 에피소드와 auto_runs.csv를 저장할 폴더(기본 server/correction_config.py CORRECTION_DIR = data/corrections).
+        record_dir만 주면(테스트) 그 옆의 corrections 폴더를 쓴다. 그래서 테스트가 실제 data/corrections를 건드리지 않는다.
+    correction_store: 저장소 자체를 바꿔 끼울 때(테스트에서 쓰기 실패를 흉내 낼 때)."""
 
     def default_factory(on_frame):
         return SimWorker(
@@ -136,8 +143,18 @@ def create_app(
         await asyncio.to_thread(control.start)
         # 녹화 서비스: 저장된 에피소드 목록을 읽는다(폴더가 없으면 빈 목록. 폴더는 첫 저장 때 만든다).
         store = record_store or EpisodeStore(record_dir)
+        if correction_store is not None:
+            corrections = correction_store
+        elif correction_dir is not None:
+            corrections = CorrectionStore(correction_dir)
+        elif record_dir is not None or record_store is not None:
+            corrections = CorrectionStore(Path(store.root).parent / "corrections")
+        else:
+            corrections = CorrectionStore()
         kwargs = {} if record_max_s is None else {"max_s": record_max_s}
-        recording = await asyncio.to_thread(lambda: RecordingService(worker, control, store=store, **kwargs))
+        recording = await asyncio.to_thread(
+            lambda: RecordingService(worker, control, store=store, extra_seeds=corrections.used_seeds, **kwargs)
+        )
         recording.start()
         hub.recording = recording
 
@@ -156,8 +173,9 @@ def create_app(
 
         auto = AutoRunner(
             worker, owner, policy_client or PolicyClient(), recording, control=control, arm_check=arm_check,
-            max_s=auto_config.AUTO_MAX_S if auto_max_s is None else auto_max_s,
+            max_s=auto_config.AUTO_MAX_S if auto_max_s is None else auto_max_s, store=corrections,
         )
+        recording.decision_pending = auto.has_pending_decision  # 저장/버리기를 고르기 전에는 블록 리셋도 받지 않는다
         hub.auto = auto
         app.state.hub = hub
         log.info(

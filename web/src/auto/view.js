@@ -3,12 +3,14 @@
 // 버튼을 누를 수 있는지는 서버가 같은 규칙으로 다시 검사한다(화면은 안내일 뿐이다).
 
 export const AUTO_BUTTON_IDS = ['start', 'stop', 'shutdown_policy']
+// 교정(4-2) 버튼: 넘겨받기/돌려주기(같은 토글 버튼과 Space), 끝난 뒤 저장/버리기. 표시 규칙은 correction.js.
+export const CORRECTION_BUTTON_IDS = ['takeover', 'handback', 'save_correction', 'discard_correction']
 
 const BUSY = ['loading', 'running']
 
 // 버튼 id → 서버로 보낼 메시지. 모르는 id면 null.
 export function commandFor(buttonId) {
-  return AUTO_BUTTON_IDS.includes(buttonId) ? { type: 'auto', action: buttonId } : null
+  return AUTO_BUTTON_IDS.includes(buttonId) || CORRECTION_BUTTON_IDS.includes(buttonId) ? { type: 'auto', action: buttonId } : null
 }
 
 // 각 버튼이 지금 눌릴 수 있는지와 안 될 때의 이유.
