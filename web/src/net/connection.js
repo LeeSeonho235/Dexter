@@ -1,11 +1,14 @@
 // 파이썬 서버와의 WebSocket 연결 (React에 의존하지 않음).
 //
 // 보내는 것: hand 메시지(JSON 텍스트, 최대 HAND_SEND_MAX_HZ), view(보기 방향, 최대 VIEW_SEND_MAX_HZ),
-// height(키보드 높이, 누르는 동안 HEIGHT_REPEAT_HZ), record/reset(녹화 버튼, 누를 때마다 한 번), ping.
+// height(키보드 높이, 누르는 동안 HEIGHT_REPEAT_HZ), record/reset(녹화 버튼, 누를 때마다 한 번), ping,
+// aux(보조 카메라 화면을 받을지, 체크박스를 바꿀 때와 연결이 열릴 때).
 // 웹캠 영상·이미지는 보내지 않는다.
-// 받는 것: 시뮬레이션 화면 JPEG(바이너리) → onFrame(blob), state/pong/error(JSON 텍스트).
+// 받는 것: 시뮬레이션 화면 JPEG(바이너리) → onFrame(blob), state/pong/error(JSON 텍스트),
+// aux_frame(보조 카메라 두 시점을 이은 base64 JPEG, JSON 텍스트) → onAuxFrame({ seq, w, h, views, src }). 메인 화면의 바이너리 처리는 그대로다.
 // 끊기면 RECONNECT_DELAY_MS 뒤 다시 연결한다.
 
+import { auxFrameFromMessage } from '../aux/view.js'
 import { viewMessage } from '../view/camera.js'
 import {
   HAND_SEND_MAX_HZ,
@@ -34,6 +37,7 @@ export class SimConnection {
     now = () => performance.now(),
     onFrame = () => {},
     onState = () => {},
+    onAuxFrame = () => {},
     maxHandHz = HAND_SEND_MAX_HZ,
     maxViewHz = VIEW_SEND_MAX_HZ,
     setTimer = (fn, ms) => setTimeout(fn, ms),
@@ -46,6 +50,7 @@ export class SimConnection {
     this.now = now
     this.onFrame = onFrame
     this.onState = onState
+    this.onAuxFrame = onAuxFrame
     this.pingIntervalMs = pingIntervalMs
     this.reconnectDelayMs = reconnectDelayMs
 
@@ -136,6 +141,15 @@ export class SimConnection {
     if (!this.ws || this.ws.readyState !== OPEN) return false
     if (!msg || msg.type !== 'auto') return false
     this.ws.send(JSON.stringify(msg))
+    return true
+  }
+
+  // 보조 카메라 화면을 이 연결이 받을지({type:'aux', enabled:true|false})를 서버에 알린다. 서버는 연결마다 따로 기억하고 기본은 꺼짐이다.
+  // enabled는 true/false만 받는다(그 외는 보내지 않는다). 연결이 열려 있지 않으면 false. 서버에서 aux가 꺼져 있으면 서버가 조용히 무시한다.
+  sendAux(msg) {
+    if (!this.ws || this.ws.readyState !== OPEN) return false
+    if (!msg || msg.type !== 'aux' || typeof msg.enabled !== 'boolean') return false
+    this.ws.send(JSON.stringify({ type: 'aux', enabled: msg.enabled }))
     return true
   }
 
@@ -248,6 +262,10 @@ export class SimConnection {
       this.onState(msg)
     } else if (msg.type === 'error') {
       this.lastServerError = msg.reason
+    } else if (msg.type === 'aux_frame') {
+      // 보조 카메라 프레임(텍스트). 형식이 이상하면 버린다. 메인 화면 프레임 통계(frameRate)에는 넣지 않는다.
+      const frame = auxFrameFromMessage(msg)
+      if (frame) this.onAuxFrame(frame)
     }
   }
 }

@@ -7,6 +7,7 @@ import HandView from './components/HandView.jsx'
 import RecordPanel from './components/RecordPanel.jsx'
 import RobotPanel from './components/RobotPanel.jsx'
 import SimView from './components/SimView.jsx'
+import { auxMode as pickAuxMode, planAuxSend } from './aux/view.js'
 import { handEdgeStatus } from './hand/edge.js'
 import { useHeightKeys } from './input/useHeightKeys.js'
 import { useTakeoverKey } from './input/useTakeoverKey.js'
@@ -23,6 +24,11 @@ export default function App() {
   const [status, setStatus] = useState({ phase: 'idle' })
   const [frameUrl, setFrameUrl] = useState(null)
   const [netStats, setNetStats] = useState({ phase: 'idle' })
+  // 보조 카메라 화면 두 개(2-6): 마지막 aux_frame(받은 시각 포함), 사용자가 켰는가(체크박스, 기본 켬), "프레임이 최근인가"를 따질 현재 시각(ms).
+  const [auxFrame, setAuxFrame] = useState(null)
+  const [auxWanted, setAuxWanted] = useState(true)
+  const [nowMs, setNowMs] = useState(() => performance.now())
+  const auxSentRef = useRef(null) // 서버에 마지막으로 알린 aux 켜기/끄기 기록(planAuxSend)
   // 보기 방향(자유 카메라). 서버에는 하나뿐이라 화면 숫자는 서버가 알려 주는 값을 따라간다(직접 조작한 직후 제외).
   const [view, setView] = useState(() => presetView('default'))
   const viewRef = useRef(view) // 드래그가 연달아 들어와도 항상 최신 값에서 계산하려고 ref도 둔다
@@ -57,14 +63,23 @@ export default function App() {
         setView(shown)
       }
     }
-    const conn = new SimConnection({ url: wsUrl(window.location), onFrame, onState })
+    // 보조 카메라 프레임(base64 JPEG 한 장 = 두 시점): 받은 시각을 붙여 두고, 화면은 CSS로 둘로 나눠 보여 준다(주소가 data라서 해제할 것이 없다).
+    function onAuxFrame(frame) {
+      setAuxFrame({ ...frame, receivedMs: performance.now() })
+    }
+    const conn = new SimConnection({ url: wsUrl(window.location), onFrame, onState, onAuxFrame })
     connRef.current = conn
     conn.start()
-    const timer = setInterval(() => setNetStats(conn.getStats()), STATS_REFRESH_MS)
+    const timer = setInterval(() => {
+      setNetStats(conn.getStats())
+      setNowMs(performance.now()) // 보조 프레임이 끊겼는지 따지는 시계(같은 주기로 다시 그린다)
+    }, STATS_REFRESH_MS)
     return () => {
       clearInterval(timer)
       conn.stop()
       connRef.current = null
+      setAuxFrame(null)
+      auxSentRef.current = null
       if (frameUrlRef.current) URL.revokeObjectURL(frameUrlRef.current)
       frameUrlRef.current = null
       setFrameUrl(null)
@@ -111,6 +126,19 @@ export default function App() {
   const mappingMode = control?.mapping_mode ?? null
   const referenceHand = control?.reference_hand ?? null
 
+  // 보조 카메라(2-6): 서버에서 aux가 켜져 있을 때만(AUX_ENABLED=1) 의미가 있다. 서버는 연결마다 "받겠다"는 표시를 따로 갖고 기본은 꺼짐이라,
+  // 연결이 열릴 때(재연결 포함)와 체크박스를 바꿀 때 알려 준다(aux/view.js planAuxSend). 못 보냈으면 기록하지 않아 다음에 다시 시도한다.
+  const serverAux = connected ? serverState?.aux : undefined
+  const serverAuxEnabled = serverAux?.enabled === true
+  const connectCount = netStats.connectCount ?? 0
+  useEffect(() => {
+    const plan = planAuxSend({ connected, serverEnabled: serverAuxEnabled, wanted: auxWanted, connectCount }, auxSentRef.current)
+    if (plan.message && !connRef.current?.sendAux(plan.message)) return
+    auxSentRef.current = plan.last
+  }, [connected, serverAuxEnabled, auxWanted, connectCount])
+  // 진짜 화면 두 개('mirrors') 또는 기존 2D 그림('fallback'): 켜져 있고, 오류가 없고, 프레임이 최근일 때만 진짜 화면.
+  const auxMode = pickAuxMode({ wanted: auxWanted, connected, auxState: serverAux, frame: auxFrame, nowMs })
+
   // 키보드 높이(↓/S 내리기, ↑/W 올리기, Shift = 천천히). 눌린 키 상태를 돌려받아 화면에 표시한다.
   const heightKeys = useHeightKeys({ connRef, connected })
   // Space = 넘겨받기/돌려주기 토글(AUTO 상자의 큰 버튼과 같은 일). 버튼에 포커스가 있어도 동작하고 페이지는 스크롤되지 않는다.
@@ -137,6 +165,12 @@ export default function App() {
           mode={mappingMode}
           control={control}
           scene={connected ? serverState?.scene : undefined}
+          auxMode={auxMode}
+          auxFrame={auxFrame}
+          auxState={serverAux}
+          auxWanted={auxWanted}
+          onAuxToggle={setAuxWanted}
+          connected={connected}
           onDrag={onViewDrag}
           onWheel={onViewWheel}
           onPreset={onViewPreset}

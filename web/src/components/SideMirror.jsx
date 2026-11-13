@@ -14,7 +14,8 @@ import { drawShapes, makeProjection, sideViewShapes } from '../scene/sideView.js
 const PROJECTION = makeProjection(SIDE_MIRROR_SIZE_PX, CAPTION_HEIGHT_PX)
 
 // control: 서버 state.control, scene: 서버 state.scene. 연결이 없으면 둘 다 undefined로 받는다(바닥선만 그린다).
-export default function SideMirror({ control, scene }) {
+// className: 덧붙일 클래스(진짜 보조 화면이 켜져 있을 때는 창이 좁아 그쪽이 숨겨진 경우에만 보이게 하려고 쓴다, index.css).
+export default function SideMirror({ control, scene, className = '' }) {
   const canvasRef = useRef(null)
 
   useEffect(() => {
@@ -39,7 +40,7 @@ export default function SideMirror({ control, scene }) {
   }
 
   return (
-    <div className="side-mirror" style={position} role="img" aria-label={SIDE_MIRROR_CAPTION.join('. ')}>
+    <div className={className ? `side-mirror ${className}` : 'side-mirror'} style={position} role="img" aria-label={SIDE_MIRROR_CAPTION.join('. ')}>
       <canvas ref={canvasRef} style={{ width: SIDE_MIRROR_SIZE_PX.width, height: SIDE_MIRROR_SIZE_PX.height }} />
       <div className="side-mirror-caption" style={{ height: CAPTION_HEIGHT_PX }}>
         {SIDE_MIRROR_CAPTION.map((line) => (

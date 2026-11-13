@@ -411,6 +411,73 @@ button {
   background: rgba(0, 0, 0, 0.6);
 }
 
+/* 보조 카메라 화면 두 개(2-6, 보기 전용): 서버가 이어 보낸 JPEG 한 장을 칸 둘로 나눠 보여 준다. 크기·위치는 src/aux/config.js에서 정한다(인라인 style).
+   클릭을 받지 않아 메인 화면 끌기·휠을 방해하지 않는다. */
+.sim-view {
+  container-type: inline-size; /* 메인 화면 가로를 기준으로 아래 @container가 좁은 창을 판단한다 */
+}
+
+.aux-mirrors {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.aux-tile {
+  position: absolute;
+  overflow: hidden;
+  background-color: #000;
+  background-repeat: no-repeat;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.45);
+  border-radius: 3px;
+}
+
+.aux-tile-label {
+  position: absolute;
+  top: 0;
+  left: 0;
+  padding: 1px 5px;
+  font-size: 10px;
+  line-height: 12px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.6);
+  border-bottom-right-radius: 3px;
+}
+
+/* 진짜 보조 화면이 켜져 있을 때 같이 그려 두는 2D 그림은 평소에는 숨긴다 */
+.side-mirror-narrow-only {
+  display: none;
+}
+
+/* 메인 화면 가로가 360px보다 좁으면(src/aux/config.js AUX_MIN_VIEW_WIDTH_PX = 360) 나침반과 겹치므로 진짜 보조 화면은 숨기고 2D 그림을 보여 준다 */
+@container (max-width: 359px) {
+  .aux-mirrors {
+    display: none;
+  }
+
+  .side-mirror-narrow-only {
+    display: block;
+  }
+}
+
+.aux-toggle-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  margin: 6px 0;
+  font-size: 14px;
+}
+
+.aux-toggle {
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.aux-status {
+  color: #555;
+}
+
 /* 웹캠 화면: 손이 가장자리 10% 안쪽에 들어오면 테두리를 빨갛게 */
 .hand-view.edge-warning {
   outline: 6px solid #e02020;
