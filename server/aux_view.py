@@ -1,16 +1,21 @@
-"""보조 카메라 렌더 스레드(2-6): 보기 전용 작은 화면. 이 파일만 aux를 안다.
+"""보조 카메라 렌더 스레드(2-6): 보기 전용 작은 화면 두 개(옆에서, 비스듬히). 이 파일만 aux를 안다.
 
-격리 설계 (server/tests/test_aux_isolation.py가 확인한다):
-- 자기만의 MjModel / MjData / Renderer를 쓴다. 시뮬레이션 스레드의 MjData나 학습용 StateRenderer와 아무것도 공유하지 않는다.
+한 번에 두 시점을 그린다: GL 컨텍스트 하나, 오프스크린 버퍼 하나에 viewport 둘을 가로로 나란히 그리고, 읽기와 JPEG 인코딩은 한 번만 한다
+(프로브 측정으로 컨텍스트 둘을 따로 쓰는 것보다 약 15~20% 빠르다). 이미지 한 장 = 시점 수 × 시점 너비 (보통 320x120).
+로봇 메시는 시작할 때 한 번 삼각형을 줄인 모델로 그린다(server/aux_mesh.py, AUX_MESH_FRACTION). 줄이지 않으면 렌더가 약 5배 느리다.
+
+격리 설계 (server/tests/test_aux_isolation.py, test_aux_view.py가 확인한다):
+- 자기만의 MjModel(줄인 메시) / MjData / GL 컨텍스트를 쓴다. 시뮬레이션 스레드의 MjData나 학습용 StateRenderer와 아무것도 공유하지 않는다.
 - 시뮬레이션 스레드는 offer_qpos()로 qpos 13개(rad, m)의 사본만 넘긴다. 락 안에서 복사만 하므로 렌더 시간이 물리 틱을 늘리지 않는다.
-- Renderer(EGL)는 이 파일의 스레드 안에서 만들고 쓰고 닫는다.
-- 렌더·녹화·AUTO·평가 코드(render.py, recorder.py, auto.py, eval_env.py, correction*.py)는 이 파일을 import하지 않는다.
+- GL 컨텍스트(EGL)는 이 파일의 스레드 안에서 만들고 쓰고 닫는다.
+- 렌더·녹화·AUTO·평가 코드(render.py, recorder.py, auto.py, eval_env.py, correction*.py)는 이 파일과 aux_mesh.py를 import하지 않는다.
 
 끄는 장치:
 1. AUX_ENABLED가 False면 start()는 스레드도 렌더러도 만들지 않고, offer_qpos()는 아무 일도 안 한다.
 2. 보는 연결이 0개(set_viewer_count)이면 렌더하지 않는다.
 3. 크기 두 단계(set_size_level), fps는 설정.
-4. 렌더가 AUX_MAX_RENDER_MS를 넘으면 fps를 반으로 줄인다. AUTO 중에는(AUX_PAUSE_DURING_AUTO) 멈춘다.
+4. 렌더가 AUX_MAX_RENDER_MS를 넘으면 fps를 반으로 줄인다. AUTO 중에는 AUX_PAUSE_DURING_AUTO가 True일 때만 멈춘다(기본 False).
+5. 스레드가 죽으면 state()["error"]에 이유가 남는다(웹이 2D 보조 그림으로 돌아가는 데 쓴다).
 """
 
 import io
@@ -22,10 +27,12 @@ from pathlib import Path
 
 import mujoco
 import numpy as np
+from mujoco import gl_context
 from PIL import Image
 
 from server import aux_view_config as ac
 from server import config
+from server.aux_mesh import build_model
 from server.render import set_render_flags
 from server.view import clamp_view, make_free_camera
 
@@ -47,6 +54,49 @@ def next_render_time(next_s: float, period_s: float, after_render_s: float) -> f
     return max(next_s + period_s, after_render_s)
 
 
+class _MultiViewRenderer:
+    """GL 컨텍스트 하나에 같은 크기 viewport n개를 가로로 나란히 그린다. 만든 스레드에서만 쓰고 close()까지 부른다.
+
+    mujoco.Renderer와 같은 순서로 컨텍스트를 만들지만 viewport 여러 개를 한 버퍼에 그리려고 저수준 함수(mjr_render)를 직접 쓴다.
+    scene 속성은 server.render.set_render_flags가 읽는 이름이다.
+    """
+
+    def __init__(self, model: mujoco.MjModel, view_w_px: int, view_h_px: int, n_views: int) -> None:
+        self._model = model
+        self.view_w_px, self.view_h_px, self.n_views = view_w_px, view_h_px, n_views
+        self.width_px = view_w_px * n_views
+        self._gl = gl_context.GLContext(self.width_px, view_h_px)
+        self._ctx = None
+        try:
+            self._gl.make_current()
+            self._ctx = mujoco.MjrContext(model, mujoco.mjtFontScale.mjFONTSCALE_150.value)
+            mujoco.mjr_setBuffer(mujoco.mjtFramebuffer.mjFB_OFFSCREEN.value, self._ctx)
+            self.scene = mujoco.MjvScene(model, maxgeom=10000)
+            self._option = mujoco.MjvOption()
+            self._out = np.empty((view_h_px, self.width_px, 3), dtype=np.uint8)
+        except BaseException:
+            self.close()
+            raise
+
+    def render(self, data: mujoco.MjData, cameras: list) -> np.ndarray:
+        """cameras[i]가 왼쪽에서 i번째 viewport. 반환: (높이, 너비 × 시점 수, 3) uint8(위가 위인 방향, 새 배열)."""
+        self._gl.make_current()
+        for i, camera in enumerate(cameras):
+            mujoco.mjv_updateScene(self._model, data, self._option, None, camera, mujoco.mjtCatBit.mjCAT_ALL.value, self.scene)
+            set_render_flags(self, config.RENDER_SHADOW, config.RENDER_REFLECTION)
+            mujoco.mjr_render(mujoco.MjrRect(i * self.view_w_px, 0, self.view_w_px, self.view_h_px), self.scene, self._ctx)
+        mujoco.mjr_readPixels(self._out, None, mujoco.MjrRect(0, 0, self.width_px, self.view_h_px), self._ctx)
+        return np.ascontiguousarray(np.flipud(self._out))
+
+    def close(self) -> None:
+        if self._ctx is not None:
+            self._ctx.free()
+            self._ctx = None
+        if self._gl is not None:
+            self._gl.free()
+            self._gl = None
+
+
 class AuxViewWorker:
     def __init__(
         self,
@@ -55,11 +105,14 @@ class AuxViewWorker:
         enabled: bool | None = None,
         fps: float | None = None,
         size_level: str | None = None,
+        mesh_fraction: float | None = None,
         on_frame: AuxFrameCallback | None = None,
     ) -> None:
-        """enabled를 안 주면 aux_view_config.AUX_ENABLED. 꺼져 있으면 아무것도 만들지 않는다."""
+        """enabled를 안 주면 aux_view_config.AUX_ENABLED. 꺼져 있으면 아무것도 만들지 않는다.
+        mesh_fraction을 안 주면 AUX_MESH_FRACTION(로봇 메시 삼각형을 이 비율로 줄인 모델로 그린다)."""
         self._scene_path = scene_path
         self.enabled = ac.AUX_ENABLED if enabled is None else enabled
+        self._mesh_fraction = float(ac.AUX_MESH_FRACTION if mesh_fraction is None else mesh_fraction)
         self._base_fps = float(ac.AUX_FPS if fps is None else fps)
         self._on_frame = on_frame
         level = size_level or ac.AUX_SIZE_DEFAULT
@@ -77,7 +130,7 @@ class AuxViewWorker:
         self._frames = 0
         self._latest: tuple[int, bytes] | None = None
         self._last_render_ms: float | None = None
-        self._renderer: mujoco.Renderer | None = None  # 보조 스레드에서만 만들고 닫는다
+        self._renderer: _MultiViewRenderer | None = None  # 보조 스레드에서만 만들고 닫는다
 
         self._stop = threading.Event()
         self._ready = threading.Event()
@@ -141,14 +194,17 @@ class AuxViewWorker:
 
     def state(self) -> dict:
         with self._lock:
-            width_px, height_px = ac.AUX_SIZE_LEVELS[self._size_level]
+            view_w_px, height_px = ac.AUX_SIZE_LEVELS[self._size_level]
+            views = len(ac.AUX_CAMERA_VIEWS)
             return {
                 "enabled": self.enabled,
                 "running": self.is_alive,
                 "viewers": self._viewer_count,
                 "paused": self._paused,
                 "size_level": self._size_level,
-                "width_px": width_px,
+                "views": views,
+                "view_width_px": view_w_px,  # 시점 하나
+                "width_px": view_w_px * views,  # 프레임 한 장(시점을 가로로 이어 붙인 것)
                 "height_px": height_px,
                 "fps": self._fps,
                 "slowed": self._slowed,
@@ -162,22 +218,21 @@ class AuxViewWorker:
     def _run(self) -> None:
         renderer = None
         try:
-            model = mujoco.MjModel.from_xml_path(str(self._scene_path))
+            model = build_model(self._scene_path, self._mesh_fraction)  # 시작할 때 한 번(약 0.6 s). 시뮬레이션의 모델과는 별개다
             data = mujoco.MjData(model)
-            camera = make_free_camera(clamp_view(**ac.AUX_CAMERA_VIEW), ac.AUX_CAMERA_LOOKAT_M)
+            cameras = [make_free_camera(clamp_view(**view), ac.AUX_CAMERA_LOOKAT_M) for view in ac.AUX_CAMERA_VIEWS]
             level = self._size_level
             renderer = self._make_renderer(model, level)
         except BaseException as err:  # noqa: BLE001 - start()에서 다시 던진다
             self._error = err
             self._record_error(err)
             self._ready.set()
-            if renderer is not None:
-                renderer.close()
+            self._close_renderer_quietly()
             return
         self._ready.set()
 
         try:
-            level = self._loop(model, data, camera, renderer, level)
+            level = self._loop(model, data, cameras, renderer, level)
         except Exception as err:
             log.exception("aux view worker crashed")
             self._record_error(err)
@@ -189,9 +244,9 @@ class AuxViewWorker:
         with self._lock:
             self._error_text = f"{type(err).__name__}: {err}"
 
-    def _make_renderer(self, model: mujoco.MjModel, level: str) -> mujoco.Renderer:
-        width_px, height_px = ac.AUX_SIZE_LEVELS[level]
-        self._renderer = mujoco.Renderer(model, height_px, width_px)
+    def _make_renderer(self, model: mujoco.MjModel, level: str) -> _MultiViewRenderer:
+        view_w_px, view_h_px = ac.AUX_SIZE_LEVELS[level]
+        self._renderer = _MultiViewRenderer(model, view_w_px, view_h_px, len(ac.AUX_CAMERA_VIEWS))
         return self._renderer
 
     def _close_renderer_quietly(self) -> None:
@@ -199,7 +254,7 @@ class AuxViewWorker:
             self._renderer.close()
             self._renderer = None
 
-    def _loop(self, model, data, camera, renderer, level: str) -> str:
+    def _loop(self, model, data, cameras, renderer, level: str) -> str:
         next_s = time.monotonic()
         while not self._stop.is_set():
             with self._lock:
@@ -219,7 +274,7 @@ class AuxViewWorker:
                 self._renderer = None  # 다시 만들다 실패해도 _run의 정리가 닫힌 것을 또 닫지 않게
                 renderer = self._make_renderer(model, wanted_level)
                 level = wanted_level
-            self._render_once(model, data, camera, renderer)
+            self._render_once(model, data, cameras, renderer)
             next_s = next_render_time(next_s, period_s, time.monotonic())
         return level
 
@@ -231,15 +286,13 @@ class AuxViewWorker:
                 self._fps = max(ac.AUX_MIN_FPS, self._fps / 2.0)
                 self._slowed = True
 
-    def _render_once(self, model, data, camera, renderer) -> None:
+    def _render_once(self, model, data, cameras, renderer) -> None:
         t0 = time.perf_counter()
         with self._lock:
             data.qpos[:QPOS_DIM] = self._qpos
         data.qvel[:] = 0.0
         mujoco.mj_forward(model, data)
-        renderer.update_scene(data, camera=camera)
-        set_render_flags(renderer, config.RENDER_SHADOW, config.RENDER_REFLECTION)
-        pixels = renderer.render()
+        pixels = renderer.render(data, cameras)  # 두 시점을 한 버퍼에 그리고 한 번에 읽는다
         buf = io.BytesIO()
         Image.fromarray(pixels).save(buf, format="JPEG", quality=ac.AUX_JPEG_QUALITY)
         jpeg = buf.getvalue()

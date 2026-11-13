@@ -9,9 +9,13 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from server import aux_mesh
+from server import aux_view as aux_view_module
 from server import aux_view_config as ac
 from server import config
 from server.aux_view import AuxViewWorker, is_due, next_render_time
+from server.render import set_render_flags
+from server.view import clamp_view, make_free_camera
 
 
 @pytest.fixture(scope="module")
@@ -46,6 +50,12 @@ def jpeg_size(jpeg: bytes) -> tuple[int, int]:
     return Image.open(io.BytesIO(jpeg)).size
 
 
+def frame_size(level: str) -> tuple[int, int]:
+    """프레임 한 장 = 시점 수 × 시점 너비 (px), 높이."""
+    view_w_px, height_px = ac.AUX_SIZE_LEVELS[level]
+    return view_w_px * len(ac.AUX_CAMERA_VIEWS), height_px
+
+
 @pytest.mark.skipif("AUX_ENABLED" in os.environ, reason="AUX_ENABLED 환경변수가 설정돼 있어 기본값을 볼 수 없다")
 def test_default_is_off():
     assert ac.AUX_ENABLED is False
@@ -70,9 +80,77 @@ def test_frame_has_configured_size_and_is_a_jpeg(make_worker, home_qpos):
     wait_for(lambda: worker.latest_frame is not None)
     seq, jpeg = worker.latest_frame
     assert seq >= 1 and jpeg[:2] == b"\xff\xd8"
-    assert jpeg_size(jpeg) == ac.AUX_SIZE_LEVELS[ac.AUX_SIZE_DEFAULT]
+    assert jpeg_size(jpeg) == frame_size(ac.AUX_SIZE_DEFAULT) == (320, 120)  # 두 시점을 가로로 이어 붙인 한 장
     image = np.asarray(Image.open(io.BytesIO(jpeg)))
     assert image.std() > 5  # 빈 화면이 아니다
+    state = worker.state()
+    assert (state["views"], state["view_width_px"], state["width_px"], state["height_px"]) == (2, 160, 320, 120)
+
+
+def reference_halves(pose: np.ndarray) -> list[np.ndarray]:
+    """같은 줄인 모델을 mujoco.Renderer로 시점 하나씩 그린 그림(첫 렌더링은 버린다). 두 시점 합친 그림의 왼쪽, 오른쪽 절반과 비교한다."""
+    model = aux_mesh.build_model(config.SCENE_PATH, ac.AUX_MESH_FRACTION)
+    data = mujoco.MjData(model)
+    data.qpos[:13] = pose
+    mujoco.mj_forward(model, data)
+    view_w_px, height_px = ac.AUX_SIZE_LEVELS["normal"]
+    out = []
+    with mujoco.Renderer(model, height_px, view_w_px) as renderer:
+        for view in ac.AUX_CAMERA_VIEWS:
+            camera = make_free_camera(clamp_view(**view), ac.AUX_CAMERA_LOOKAT_M)
+            for _ in range(2):
+                renderer.update_scene(data, camera=camera)
+                set_render_flags(renderer, config.RENDER_SHADOW, config.RENDER_REFLECTION)
+                pixels = renderer.render()
+            out.append(pixels)
+    return out
+
+
+def test_left_half_is_the_side_view_and_right_half_the_oblique_view(make_worker, home_qpos):
+    pose = home_qpos.copy()
+    pose[0], pose[1] = 0.4, -1.2  # 팔을 움직인 자세(두 시점이 서로 다르게 보인다)
+    worker = make_worker(fps=30.0)
+    worker.set_viewer_count(1)
+    worker.offer_qpos(pose)
+    wait_for(lambda: worker.state()["frames"] >= 2)
+    image = np.asarray(Image.open(io.BytesIO(worker.latest_frame[1])))
+    ref_side, ref_oblique = reference_halves(pose)
+
+    def mad(a, b):
+        return float(np.abs(a.astype(np.int16) - b.astype(np.int16)).mean())
+
+    # 참조 두 장을 가로로 이어 같은 JPEG 품질로 한 번 왕복시키면 JPEG 손실까지 같아진다(2026-11-13 측정: 차이 0). 그래서 기준이 작다.
+    buf = io.BytesIO()
+    Image.fromarray(np.hstack([ref_side, ref_oblique])).save(buf, format="JPEG", quality=ac.AUX_JPEG_QUALITY)
+    expected = np.asarray(Image.open(io.BytesIO(buf.getvalue())))
+    assert image.shape == expected.shape == (120, 320, 3)
+    assert mad(image, expected) < 0.5
+    # 비교가 빈 것이 아님: 시점 순서를 바꾸거나 위아래가 뒤집히면 크게 달라진다(측정: 맞는 쪽 약 3, 반대쪽 약 66 — JPEG 손실만 비교하면 약 3)
+    left, right = image[:, :160], image[:, 160:]
+    assert mad(left, ref_oblique) > 20.0 and mad(right, ref_side) > 20.0
+    assert mad(left, right) > 20.0  # 두 시점은 다른 그림이다
+
+
+def test_reduced_mesh_model_is_built_once_at_start_with_the_configured_fraction(monkeypatch, home_qpos):
+    calls = []
+    real_build = aux_view_module.build_model
+
+    def spy(scene_path, fraction, *args, **kwargs):
+        calls.append(fraction)
+        return real_build(scene_path, fraction, *args, **kwargs)
+
+    monkeypatch.setattr(aux_view_module, "build_model", spy)
+    worker = AuxViewWorker(enabled=True, fps=30.0)
+    worker.start()
+    try:
+        worker.set_viewer_count(1)
+        worker.offer_qpos(home_qpos)
+        wait_for(lambda: worker.state()["frames"] >= 3)
+        assert calls == [ac.AUX_MESH_FRACTION] == [0.10]  # 프레임마다 다시 만들지 않는다
+    finally:
+        worker.stop()
+    custom = AuxViewWorker(enabled=False, mesh_fraction=0.5)
+    assert custom._mesh_fraction == 0.5
 
 
 def test_size_level_change_changes_the_frame_size(make_worker, home_qpos):
@@ -81,7 +159,7 @@ def test_size_level_change_changes_the_frame_size(make_worker, home_qpos):
     worker.offer_qpos(home_qpos)
     wait_for(lambda: worker.latest_frame is not None)
     worker.set_size_level("small")
-    wait_for(lambda: jpeg_size(worker.latest_frame[1]) == ac.AUX_SIZE_LEVELS["small"])
+    wait_for(lambda: jpeg_size(worker.latest_frame[1]) == frame_size("small"))
     assert worker.state()["size_level"] == "small"
     with pytest.raises(ValueError):
         worker.set_size_level("huge")
@@ -147,8 +225,23 @@ def test_real_thread_renders_at_most_about_the_configured_rate(make_worker, home
     assert worker.state()["frames"] <= 10  # 설정 fps(4)를 크게 넘어 그리지 않는다
 
 
-def test_pauses_during_auto_and_resumes_after(make_worker, home_qpos):
-    assert ac.AUX_PAUSE_DURING_AUTO
+def test_default_is_not_to_pause_during_auto(make_worker, home_qpos):
+    """교정은 AUTO 중에 봐야 의미가 있어서 기본은 멈추지 않는다."""
+    assert ac.AUX_PAUSE_DURING_AUTO is False
+    worker = make_worker(fps=30.0)
+    worker.set_viewer_count(1)
+    worker.offer_qpos(home_qpos, auto_running=True)
+    wait_for(lambda: worker.state()["frames"] >= 2)
+    frames = worker.state()["frames"]
+    for _ in range(5):
+        worker.offer_qpos(home_qpos, auto_running=True)
+        time.sleep(0.05)
+    assert not worker.state()["paused"]
+    wait_for(lambda: worker.state()["frames"] > frames)  # AUTO 중에도 계속 그린다
+
+
+def test_pauses_during_auto_and_resumes_after_when_configured(make_worker, home_qpos, monkeypatch):
+    monkeypatch.setattr(ac, "AUX_PAUSE_DURING_AUTO", True)  # 멈추는 장치 자체는 그대로 동작한다
     worker = make_worker(fps=30.0)
     worker.set_viewer_count(1)
     worker.offer_qpos(home_qpos)
