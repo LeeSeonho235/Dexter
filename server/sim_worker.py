@@ -147,6 +147,7 @@ class SimWorker:
         self._rendered_view: CameraView | None = None  # 가장 최근 프레임을 그린 보기 방향(고정 카메라면 None)
         self._free_camera: mujoco.MjvCamera | None = None  # 시뮬레이션 스레드에서만 만들고 쓴다
         self._recorder = None  # 녹화기(server/recorder.py). 있으면 물리 스텝 직전마다 on_step을 부른다
+        self._aux = None  # 보조 카메라(2-6, server/aux_view.py). 있으면 틱마다 qpos 사본만 넘긴다(읽기 전용, 이 파일은 aux_view를 import하지 않는다)
         self._place_cmd: _PlaceCommand | None = None  # 다른 스레드가 맡긴 "블록 놓기" 명령 한 개
         # 제어 주체(server/owner.py). AUTO이면 ControlWorker가 정한 ctrl을 적용하지 않는다(ctrl을 쓰는 주체는 하나).
         self.owner = ControlOwner()
@@ -200,6 +201,13 @@ class SimWorker:
     def attach_recorder(self, recorder) -> None:
         """녹화기를 연결한다(None이면 떼어낸다). 시뮬레이션 스레드가 물리 스텝 직전마다 recorder.on_step(시각, qpos, ctrl)을 부른다."""
         self._recorder = recorder
+
+    def attach_aux(self, aux) -> None:
+        """보조 카메라(offer_qpos(qpos, auto_running)를 가진 객체)를 연결한다(None이면 뗀다).
+
+        시뮬레이션 스레드가 매 틱 물리 진행이 끝난 뒤 qpos 사본 하나만 넘긴다. aux는 받은 값을 읽기만 하고 시뮬레이션 상태에 쓸 길이 없다.
+        offer_qpos가 예외를 던지면 aux를 떼고 시뮬레이션은 계속 돈다(보기 전용 기능이 시뮬레이션을 죽이면 안 된다)."""
+        self._aux = aux
 
     def start_auto(self, episode) -> str | None:
         """AUTO 에피소드를 시뮬레이션 스레드에 맡긴다(다음 틱에 시작). 받아들였으면 None, 아니면 이유.
@@ -371,6 +379,15 @@ class SimWorker:
                 self._sim_time_s = data.time
                 self._snapshot = snapshot
                 should_render = self._viewer_count > 0
+
+            # 보조 카메라(2-6): 물리가 끝난 뒤 qpos 사본(13개)만 넘긴다. 사본이라 aux가 값을 바꿔도 시뮬레이션은 영향이 없다.
+            aux = self._aux
+            if aux is not None:
+                try:
+                    aux.offer_qpos(data.qpos.copy(), auto_running=self._auto is not None)
+                except Exception:
+                    log.exception("aux offer_qpos failed; detaching the aux view (simulation continues)")
+                    self._aux = None
 
             if should_render and tick_count % self._render_every == 0:
                 self._render_and_publish(renderer, data)
