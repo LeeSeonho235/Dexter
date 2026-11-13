@@ -135,6 +135,8 @@ export default function App() {
           url={frameUrl}
           view={view}
           mode={mappingMode}
+          control={control}
+          scene={connected ? serverState?.scene : undefined}
           onDrag={onViewDrag}
           onWheel={onViewWheel}
           onPreset={onViewPreset}

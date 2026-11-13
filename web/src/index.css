@@ -381,6 +381,36 @@ button {
   pointer-events: none;
 }
 
+/* 시뮬레이션 화면 구석의 옆모습 보조 화면(보기 전용). 크기와 위치는 src/scene/config.js에서 정한다(인라인 style).
+   클릭을 받지 않아 메인 화면 끌기·휠을 방해하지 않는다. */
+.side-mirror {
+  position: absolute;
+  overflow: hidden;
+  pointer-events: none;
+  background: rgba(0, 0, 0, 0.55);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.35);
+  border-radius: 3px;
+}
+
+.side-mirror canvas {
+  display: block;
+}
+
+.side-mirror-caption {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  box-sizing: border-box;
+  padding: 2px 4px;
+  overflow: hidden;
+  font-size: 10px;
+  line-height: 12px;
+  color: #fff;
+  white-space: nowrap;
+  background: rgba(0, 0, 0, 0.6);
+}
+
 /* 웹캠 화면: 손이 가장자리 10% 안쪽에 들어오면 테두리를 빨갛게 */
 .hand-view.edge-warning {
   outline: 6px solid #e02020;

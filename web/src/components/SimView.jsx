@@ -6,12 +6,14 @@
 import { useEffect, useRef } from 'react'
 import { formatView } from '../view/camera.js'
 import { PRESET_LABELS } from '../view/config.js'
+import SideMirror from './SideMirror.jsx'
 import ViewCompass from './ViewCompass.jsx'
 
 const WHEEL_LINE_TO_PX = 33 // deltaMode가 "줄"인 마우스(주로 Firefox)를 픽셀 단위로 맞춘다
 
 // mode: 서버의 매핑 방식('relative' | 'absolute'). 아직 모르면 기본인 상대 모드로 본다.
-export default function SimView({ url, view, mode, onDrag, onWheel, onPreset }) {
+// control, scene: 서버 state.control / state.scene. 구석의 옆모습 보조 화면(보기 전용)이 그린다.
+export default function SimView({ url, view, mode, control, scene, onDrag, onWheel, onPreset }) {
   const relative = mode !== 'absolute'
   const frameRef = useRef(null)
   const lastPointerRef = useRef(null) // 끄는 중이면 마지막 포인터 위치 {x, y}
@@ -70,6 +72,7 @@ export default function SimView({ url, view, mode, onDrag, onWheel, onPreset }) 
           <div className="placeholder">시뮬레이션 화면 기다리는 중</div>
         )}
         <ViewCompass view={view} mode={mode} />
+        <SideMirror control={control} scene={scene} />
       </div>
 
       <div className="legend">
