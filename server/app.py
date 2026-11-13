@@ -297,6 +297,23 @@ async def _send_loop(
             next_state_s = time.monotonic() + config.STATE_SEND_INTERVAL_S
 
 
+def _scene_message(worker: SimWorker) -> dict[str, Any] | None:
+    """옆모습 보조 화면(2-6)이 그릴 장면 값: 블록 중심(m)과 블록·목표 크기(m). 읽기만 한다(시뮬레이션, 녹화, 학습 이미지에 아무 영향 없음).
+
+    집게 끝(tip_m)과 열림/닫힘은 state.control에 이미 있다. 시뮬레이션이 아직 첫 틱을 안 했으면 None.
+    상수는 server/config.py 값을 그대로 보낸다(웹에 같은 숫자를 따로 적지 않는다).
+    """
+    snapshot = worker.snapshot
+    if snapshot is None:
+        return None
+    return {
+        "block_m": [round(float(v), 4) for v in snapshot["block_m"]],  # x, y, z (m)
+        "block_half_m": config.BLOCK_HALF_M,
+        "target_center_m": list(config.TARGET_CENTER_M),  # x, y (m)
+        "target_half_m": config.TARGET_HALF_M,
+    }
+
+
 def _state_message(
     conn: Connection,
     worker: SimWorker,
@@ -314,6 +331,8 @@ def _state_message(
         "control": control.state(),
         # 지금 적용 중인 보기 방향(서버에 하나뿐, 마지막에 보낸 값)
         "view": worker.view.as_dict(),
+        # 옆모습 보조 화면용 장면 값(2-6): docs/14-aux-view.md
+        "scene": _scene_message(worker),
     }
     if recording is not None:
         message["record"] = recording.state()  # 녹화 상태(3-2): docs/08-recording.md
