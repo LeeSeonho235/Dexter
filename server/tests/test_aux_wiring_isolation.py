@@ -279,9 +279,9 @@ def test_5_aux_frame_format_and_main_frame_format_are_as_specified():
         second, seen = receive_until(ws, lambda m: isinstance(m, dict) and m["type"] == "aux_frame", max_messages=800)
         for frame in (item, second):
             assert set(frame) == {"type", "seq", "w", "h", "views", "jpeg"}
-            assert (frame["w"], frame["h"], frame["views"]) == (320, 120, 2)
+            assert (frame["w"], frame["h"], frame["views"]) == (400, 150, 2)
             jpeg = base64.b64decode(frame["jpeg"], validate=True)
-            assert jpeg[:2] == b"\xff\xd8" and Image.open(io.BytesIO(jpeg)).size == (320, 120)
+            assert jpeg[:2] == b"\xff\xd8" and Image.open(io.BytesIO(jpeg)).size == (400, 150)
         assert second["seq"] > item["seq"]
 
         more = collect(ws, 0.7)

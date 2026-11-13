@@ -1,7 +1,8 @@
 """보조 카메라 렌더 스레드(2-6): 보기 전용 작은 화면 두 개(옆에서, 비스듬히). 이 파일만 aux를 안다.
 
 한 번에 두 시점을 그린다: GL 컨텍스트 하나, 오프스크린 버퍼 하나에 viewport 둘을 가로로 나란히 그리고, 읽기와 JPEG 인코딩은 한 번만 한다
-(프로브 측정으로 컨텍스트 둘을 따로 쓰는 것보다 약 15~20% 빠르다). 이미지 한 장 = 시점 수 × 시점 너비 (보통 320x120).
+(프로브 측정으로 컨텍스트 둘을 따로 쓰는 것보다 약 15~20% 빠르다). 이미지 한 장 = 시점 수 × 시점 너비 (보통 400x150).
+카메라는 작업 영역(블록과 집게)으로 다가간 고정 망원 두 개다(aux_view_config.py AUX_CAMERAS, 시야각 AUX_FOVY_DEG는 이 모델에만 적용).
 로봇 메시는 시작할 때 한 번 삼각형을 줄인 모델로 그린다(server/aux_mesh.py, AUX_MESH_FRACTION). 줄이지 않으면 렌더가 약 5배 느리다.
 
 격리 설계 (server/tests/test_aux_isolation.py, test_aux_view.py가 확인한다):
@@ -42,6 +43,24 @@ log = logging.getLogger(__name__)
 AuxFrameCallback = Callable[[int, bytes], None]
 
 QPOS_DIM = 13  # 팔 6 + 블록 자유 관절 7
+
+
+def build_aux_model(scene_path: Path, mesh_fraction: float) -> mujoco.MjModel:
+    """보조 카메라 전용 모델: 보이는 메시를 줄이고(aux_mesh.build_model) 시야각을 AUX_FOVY_DEG(망원)로 바꾼다.
+    시야각은 이 모델에만 적용된다. 시뮬레이션이 읽는 장면과 학습용 StateRenderer의 모델은 config의 45° 그대로다(test_aux_view.py가 확인한다)."""
+    model = build_model(scene_path, mesh_fraction)
+    model.vis.global_.fovy = ac.AUX_FOVY_DEG
+    return model
+
+
+def make_aux_cameras() -> list:
+    """AUX_CAMERAS(왼쪽부터 이미지의 가로 순서)에서 고정 자유 카메라를 만든다. 보기 값은 clamp_view를 거친다."""
+    return [
+        make_free_camera(
+            clamp_view(azimuth_deg=cam["azimuth_deg"], elevation_deg=cam["elevation_deg"], distance_m=cam["distance_m"]), cam["lookat_m"]
+        )
+        for cam in ac.AUX_CAMERAS
+    ]
 
 
 def is_due(now_s: float, next_s: float) -> bool:
@@ -195,7 +214,7 @@ class AuxViewWorker:
     def state(self) -> dict:
         with self._lock:
             view_w_px, height_px = ac.AUX_SIZE_LEVELS[self._size_level]
-            views = len(ac.AUX_CAMERA_VIEWS)
+            views = len(ac.AUX_CAMERAS)
             return {
                 "enabled": self.enabled,
                 "running": self.is_alive,
@@ -218,9 +237,9 @@ class AuxViewWorker:
     def _run(self) -> None:
         renderer = None
         try:
-            model = build_model(self._scene_path, self._mesh_fraction)  # 시작할 때 한 번(약 0.6 s). 시뮬레이션의 모델과는 별개다
+            model = build_aux_model(self._scene_path, self._mesh_fraction)  # 시작할 때 한 번(약 0.6 s). 시뮬레이션의 모델과는 별개다
             data = mujoco.MjData(model)
-            cameras = [make_free_camera(clamp_view(**view), ac.AUX_CAMERA_LOOKAT_M) for view in ac.AUX_CAMERA_VIEWS]
+            cameras = make_aux_cameras()
             level = self._size_level
             renderer = self._make_renderer(model, level)
         except BaseException as err:  # noqa: BLE001 - start()에서 다시 던진다
@@ -246,7 +265,7 @@ class AuxViewWorker:
 
     def _make_renderer(self, model: mujoco.MjModel, level: str) -> _MultiViewRenderer:
         view_w_px, view_h_px = ac.AUX_SIZE_LEVELS[level]
-        self._renderer = _MultiViewRenderer(model, view_w_px, view_h_px, len(ac.AUX_CAMERA_VIEWS))
+        self._renderer = _MultiViewRenderer(model, view_w_px, view_h_px, len(ac.AUX_CAMERAS))
         return self._renderer
 
     def _close_renderer_quietly(self) -> None:

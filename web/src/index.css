@@ -449,8 +449,8 @@ button {
   display: none;
 }
 
-/* 메인 화면 가로가 360px보다 좁으면(src/aux/config.js AUX_MIN_VIEW_WIDTH_PX = 360) 나침반과 겹치므로 진짜 보조 화면은 숨기고 2D 그림을 보여 준다 */
-@container (max-width: 359px) {
+/* 메인 화면 가로가 440px보다 좁으면(src/aux/config.js AUX_MIN_VIEW_WIDTH_PX = 440) 나침반과 겹치므로 진짜 보조 화면은 숨기고 2D 그림을 보여 준다 */
+@container (max-width: 439px) {
   .aux-mirrors {
     display: none;
   }

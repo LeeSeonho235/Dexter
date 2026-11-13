@@ -140,7 +140,7 @@ class Hub:
 
 def aux_frame_text(seq: int, jpeg: bytes) -> str:
     """보조 카메라 프레임을 브라우저로 보내는 JSON 텍스트. jpeg는 두 시점을 가로로 이은 한 장이고 base64로 담는다(약 4/3배).
-    w, h는 이미지 전체 크기(px), views는 시점 수(왼쪽부터 AUX_CAMERA_VIEWS 순서). 크기는 JPEG 헤더에서 읽는다(화소는 디코딩하지 않는다)."""
+    w, h는 이미지 전체 크기(px), views는 시점 수(왼쪽부터 AUX_CAMERAS 순서). 크기는 JPEG 헤더에서 읽는다(화소는 디코딩하지 않는다)."""
     width_px, height_px = Image.open(io.BytesIO(jpeg)).size
     return json.dumps(
         {
@@ -148,7 +148,7 @@ def aux_frame_text(seq: int, jpeg: bytes) -> str:
             "seq": seq,
             "w": width_px,
             "h": height_px,
-            "views": len(aux_view_config.AUX_CAMERA_VIEWS),
+            "views": len(aux_view_config.AUX_CAMERAS),
             "jpeg": base64.b64encode(jpeg).decode("ascii"),
         }
     )

@@ -52,7 +52,7 @@ from server.seeds import block_qpos_for_seed  # noqa: E402
 from server.view import clamp_view, make_free_camera  # noqa: E402
 
 # 카메라(제안). side는 aux_view_config.py의 값(= config.VIEW_PRESETS["side"]). 채택하면 oblique도 aux_view_config.py로 옮긴다.
-VIEW_SIDE = ac.AUX_CAMERA_VIEW
+VIEW_SIDE = config.VIEW_PRESETS["side"]  # 측정 때의 옆에서 카메라(시야 45°, 거리 0.8 m). 보조 화면의 현재 카메라는 aux_view_config.AUX_CAMERAS
 VIEW_OBLIQUE = {"azimuth_deg": 45.0, "elevation_deg": -25.0, "distance_m": 0.8}
 
 VIEW_W, VIEW_H = 160, 120  # px, 한 시점의 크기(기준)

@@ -88,33 +88,33 @@ describe('auxMode: 진짜 화면 두 개(mirrors) 또는 2D 그림(fallback)', (
 describe('auxTileStyle: 한 장의 이미지를 칸 둘로', () => {
   const frame = { src: 'data:image/jpeg;base64,AAAA', views: 2 }
 
-  it('옆에서 = 왼쪽 아래, 비스듬히 = 오른쪽 아래, 각 160x120, 여백은 상수', () => {
+  it('옆에서 = 왼쪽 아래, 비스듬히 = 오른쪽 아래, 각 200x150, 여백은 상수', () => {
     const [side, oblique] = AUX_TILES.map((tile, index) => auxTileStyle(tile, index, frame))
     expect(AUX_TILES.map((t) => [t.id, t.label, t.corner])).toEqual([
       ['side', '옆에서', 'bottom-left'],
       ['oblique', '비스듬히', 'bottom-right'],
     ])
-    expect(AUX_TILE_SIZE_PX).toEqual({ width: 160, height: 120 })
-    expect(side).toMatchObject({ bottom: AUX_MARGIN_PX, left: AUX_MARGIN_PX, width: 160, height: 120 })
+    expect(AUX_TILE_SIZE_PX).toEqual({ width: 200, height: 150 })
+    expect(side).toMatchObject({ bottom: AUX_MARGIN_PX, left: AUX_MARGIN_PX, width: 200, height: 150 })
     expect(side.right).toBeUndefined()
-    expect(oblique).toMatchObject({ bottom: AUX_MARGIN_PX, right: AUX_MARGIN_PX, width: 160, height: 120 })
+    expect(oblique).toMatchObject({ bottom: AUX_MARGIN_PX, right: AUX_MARGIN_PX, width: 200, height: 150 })
     expect(oblique.left).toBeUndefined()
   })
 
   it('이미지의 왼쪽 절반이 옆에서, 오른쪽 절반이 비스듬히', () => {
     const [side, oblique] = AUX_TILES.map((tile, index) => auxTileStyle(tile, index, frame))
-    expect(side.backgroundSize).toBe('320px 120px')
+    expect(side.backgroundSize).toBe('400px 150px')
     expect(side.backgroundPosition).toBe('0px 0px')
-    expect(oblique.backgroundSize).toBe('320px 120px')
-    expect(oblique.backgroundPosition).toBe('-160px 0px')
+    expect(oblique.backgroundSize).toBe('400px 150px')
+    expect(oblique.backgroundPosition).toBe('-200px 0px')
     expect(side.backgroundImage).toBe('url("data:image/jpeg;base64,AAAA")')
   })
 
-  it('서버가 작은 크기(128x96 x 2시점 = 256x96)로 보내도 칸 크기(160x120)에 맞게 늘린다', () => {
-    const small = { src: 'data:image/jpeg;base64,AAAA', views: 2, w: 256, h: 96 }
+  it('서버가 작은 크기(160x120 x 2시점 = 320x120)로 보내도 칸 크기(200x150)에 맞게 늘린다', () => {
+    const small = { src: 'data:image/jpeg;base64,AAAA', views: 2, w: 320, h: 120 }
     const [side, oblique] = AUX_TILES.map((tile, index) => auxTileStyle(tile, index, small))
-    expect(side.backgroundSize).toBe('320px 120px') // 이미지 자체 크기가 아니라 시점 수 x 칸 크기
-    expect(oblique.backgroundPosition).toBe('-160px 0px')
+    expect(side.backgroundSize).toBe('400px 150px') // 이미지 자체 크기가 아니라 시점 수 x 칸 크기
+    expect(oblique.backgroundPosition).toBe('-200px 0px')
   })
 })
 
@@ -219,10 +219,12 @@ describe('auxToggleVisible / auxStatusText', () => {
 describe('서버와 CSS에 적은 값과 같다', () => {
   it('화면 순서(옆에서, 비스듬히)가 서버 이미지의 가로 순서와 같다 (server/aux_view_config.py)', () => {
     const py = read('../../../server/aux_view_config.py')
-    expect(py).toMatch(/^AUX_CAMERA_VIEWS = \(AUX_CAMERA_VIEW, AUX_CAMERA_VIEW_OBLIQUE\)$/m)
-    expect(py).toMatch(/^AUX_CAMERA_VIEW = config\.VIEW_PRESETS\["side"\]$/m)
-    expect(py).toMatch(/AUX_CAMERA_VIEW_OBLIQUE = \{"azimuth_deg": 45\.0, "elevation_deg": -25\.0, "distance_m": 0\.8\}/)
+    const block = py.match(/^AUX_CAMERAS = \(([\s\S]*?)^\)/m)[1]
+    expect([...block.matchAll(/\{"name": "(\w+)"/g)].map((m) => m[1])).toEqual(['side', 'oblique']) // 왼쪽이 옆에서, 오른쪽이 비스듬히
     expect(AUX_TILES.map((t) => t.id)).toEqual(['side', 'oblique'])
+    expect(block).toMatch(/"name": "side", "azimuth_deg": _SIDE_AZIMUTH_DEG, "elevation_deg": -12\.0, "distance_m": 0\.68/)
+    expect(block).toMatch(/"name": "oblique", "azimuth_deg": 45\.0, "elevation_deg": -25\.0, "distance_m": 1\.0/)
+    expect(py).toMatch(/^AUX_FOVY_DEG = 20\.0/m)
   })
 
   it('칸 크기가 서버 기본 시점 크기(normal)와 같다', () => {

@@ -288,10 +288,41 @@ def test_3_importing_and_running_aux_leaves_record_config_and_hash_unchanged():
 
 
 def test_3_aux_config_imports_shared_values_instead_of_duplicating_them():
+    """보조 카메라 설정은 config.py와 겹치는 값을 import해서 쓰고 베끼지 않는다(2026-11-13 새 설계에 맞게 고침: 카메라가 망원으로 바뀌어
+    옛 확인 `AUX_CAMERA_VIEW is config.VIEW_PRESETS["side"]`, `AUX_CAMERA_LOOKAT_M is config.VIEW_LOOKAT_M`의 대상 이름이 없어졌다)."""
     from server import aux_view_config as ac
 
-    assert ac.AUX_CAMERA_VIEW is config.VIEW_PRESETS["side"]
-    assert ac.AUX_CAMERA_LOOKAT_M is config.VIEW_LOOKAT_M
+    # (1) 공유하는 값은 config.py의 값과 같다: 옆에서 방위각, 바라보는 점의 x, y
+    side, oblique = ac.AUX_CAMERAS
+    assert side["azimuth_deg"] == config.VIEW_PRESETS["side"]["azimuth_deg"]
+    for camera in ac.AUX_CAMERAS:
+        assert camera["lookat_m"][:2] == tuple(config.VIEW_LOOKAT_M[:2])
+
+    # (2) 베낀 것이 아니라 가져온 것이다: aux_view_config.py에 config.py의 시점 숫자(모든 프리셋 값과 lookat x, y)가 리터럴로 없고, 가져오는 식이 있다
+    source = (SERVER_DIR / "aux_view_config.py").read_text(encoding="utf-8")
+    literals = {
+        float(node.value)
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) and not isinstance(node.value, bool)
+    }
+    shared_numbers = {float(v) for preset in config.VIEW_PRESETS.values() for v in preset.values()}
+    shared_numbers |= {float(config.VIEW_LOOKAT_M[0]), float(config.VIEW_LOOKAT_M[1])}
+    shared_numbers.discard(0.0)  # 0은 어디에나 있다
+    assert not (literals & shared_numbers), f"config.py 값을 베꼈다: {sorted(literals & shared_numbers)}"
+    assert 'config.VIEW_PRESETS["side"]' in source and "config.VIEW_LOOKAT_M" in source
+
+    # (3) 장면 경로와 그림자·반사는 config.py 것을 그대로 쓴다: 설정 파일에서 따로 정하지 않고, 렌더 코드가 config를 읽는다
+    defined_names = {
+        target.id
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+    assert not defined_names & {"SCENE_PATH", "RENDER_SHADOW", "RENDER_REFLECTION", "VIEW_PRESETS", "VIEW_LOOKAT_M"}
+    aux_view_source = (SERVER_DIR / "aux_view.py").read_text(encoding="utf-8")
+    for name in ("config.SCENE_PATH", "config.RENDER_SHADOW", "config.RENDER_REFLECTION"):
+        assert name in aux_view_source, name
 
 
 # --- 4. 녹화 불변 ---

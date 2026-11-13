@@ -471,7 +471,7 @@ def main() -> int:
     planned_s = estimate_seconds(args.order, args.seconds, args.warmup, len(seeds))
     print(
         f"조건 {args.order}{' 시드 ' + ','.join(map(str, seeds)) if need_auto else ''}, 상한 약 {planned_s:.0f}초 예상. load {load_1min:.2f}. 공칭 틱 {1000 / config.SIM_TICK_HZ:.1f} ms, "
-        f"메인 화면 {config.FRAME_FPS} fps, aux {ac.AUX_FPS} fps({len(ac.AUX_CAMERA_VIEWS)}시점), AUX_PAUSE_DURING_AUTO={ac.AUX_PAUSE_DURING_AUTO}"
+        f"메인 화면 {config.FRAME_FPS} fps, aux {ac.AUX_FPS} fps({len(ac.AUX_CAMERAS)}시점), AUX_PAUSE_DURING_AUTO={ac.AUX_PAUSE_DURING_AUTO}"
     )
     if planned_s > 300:
         print("경고: 5분이 넘는다. --order나 --auto-seeds를 줄여 나눠 돌리는 것이 좋다.", file=sys.stderr)

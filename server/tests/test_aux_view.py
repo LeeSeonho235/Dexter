@@ -13,8 +13,10 @@ from server import aux_mesh
 from server import aux_view as aux_view_module
 from server import aux_view_config as ac
 from server import config
-from server.aux_view import AuxViewWorker, is_due, next_render_time
-from server.render import set_render_flags
+from server.aux_view import AuxViewWorker, _MultiViewRenderer, build_aux_model, is_due, make_aux_cameras, next_render_time
+from server.episode_store import EpisodeStore
+from server.render import StateRenderer, set_render_flags
+from server.sim_worker import TIP_SITE
 from server.view import clamp_view, make_free_camera
 
 
@@ -53,7 +55,7 @@ def jpeg_size(jpeg: bytes) -> tuple[int, int]:
 def frame_size(level: str) -> tuple[int, int]:
     """프레임 한 장 = 시점 수 × 시점 너비 (px), 높이."""
     view_w_px, height_px = ac.AUX_SIZE_LEVELS[level]
-    return view_w_px * len(ac.AUX_CAMERA_VIEWS), height_px
+    return view_w_px * len(ac.AUX_CAMERAS), height_px
 
 
 @pytest.mark.skipif("AUX_ENABLED" in os.environ, reason="AUX_ENABLED 환경변수가 설정돼 있어 기본값을 볼 수 없다")
@@ -80,24 +82,23 @@ def test_frame_has_configured_size_and_is_a_jpeg(make_worker, home_qpos):
     wait_for(lambda: worker.latest_frame is not None)
     seq, jpeg = worker.latest_frame
     assert seq >= 1 and jpeg[:2] == b"\xff\xd8"
-    assert jpeg_size(jpeg) == frame_size(ac.AUX_SIZE_DEFAULT) == (320, 120)  # 두 시점을 가로로 이어 붙인 한 장
+    assert jpeg_size(jpeg) == frame_size(ac.AUX_SIZE_DEFAULT) == (400, 150)  # 두 시점을 가로로 이어 붙인 한 장
     image = np.asarray(Image.open(io.BytesIO(jpeg)))
     assert image.std() > 5  # 빈 화면이 아니다
     state = worker.state()
-    assert (state["views"], state["view_width_px"], state["width_px"], state["height_px"]) == (2, 160, 320, 120)
+    assert (state["views"], state["view_width_px"], state["width_px"], state["height_px"]) == (2, 200, 400, 150)
 
 
 def reference_halves(pose: np.ndarray) -> list[np.ndarray]:
     """같은 줄인 모델을 mujoco.Renderer로 시점 하나씩 그린 그림(첫 렌더링은 버린다). 두 시점 합친 그림의 왼쪽, 오른쪽 절반과 비교한다."""
-    model = aux_mesh.build_model(config.SCENE_PATH, ac.AUX_MESH_FRACTION)
+    model = build_aux_model(config.SCENE_PATH, ac.AUX_MESH_FRACTION)  # 줄인 메시와 망원 시야각(AUX_FOVY_DEG)이 같은 모델
     data = mujoco.MjData(model)
     data.qpos[:13] = pose
     mujoco.mj_forward(model, data)
     view_w_px, height_px = ac.AUX_SIZE_LEVELS["normal"]
     out = []
     with mujoco.Renderer(model, height_px, view_w_px) as renderer:
-        for view in ac.AUX_CAMERA_VIEWS:
-            camera = make_free_camera(clamp_view(**view), ac.AUX_CAMERA_LOOKAT_M)
+        for camera in make_aux_cameras():
             for _ in range(2):
                 renderer.update_scene(data, camera=camera)
                 set_render_flags(renderer, config.RENDER_SHADOW, config.RENDER_REFLECTION)
@@ -123,12 +124,129 @@ def test_left_half_is_the_side_view_and_right_half_the_oblique_view(make_worker,
     buf = io.BytesIO()
     Image.fromarray(np.hstack([ref_side, ref_oblique])).save(buf, format="JPEG", quality=ac.AUX_JPEG_QUALITY)
     expected = np.asarray(Image.open(io.BytesIO(buf.getvalue())))
-    assert image.shape == expected.shape == (120, 320, 3)
+    assert image.shape == expected.shape == (150, 400, 3)
     assert mad(image, expected) < 0.5
     # 비교가 빈 것이 아님: 시점 순서를 바꾸거나 위아래가 뒤집히면 크게 달라진다(측정: 맞는 쪽 약 3, 반대쪽 약 66 — JPEG 손실만 비교하면 약 3)
-    left, right = image[:, :160], image[:, 160:]
+    left, right = image[:, :200], image[:, 200:]
     assert mad(left, ref_oblique) > 20.0 and mad(right, ref_side) > 20.0
     assert mad(left, right) > 20.0  # 두 시점은 다른 그림이다
+
+
+def moved_pose(home_qpos: np.ndarray) -> np.ndarray:
+    pose = home_qpos.copy()
+    pose[0], pose[1] = 0.4, -1.2
+    return pose
+
+
+def test_no_black_band_at_the_top_of_either_view(make_worker, home_qpos):
+    """이전 카메라(시야 45°, 고도 -10°)는 위쪽 27%가 하늘(검정)이었다. 지금은 고도가 시야 반각(10°)보다 가파라서 하늘이 화면 밖이다."""
+    worker = make_worker(fps=30.0)
+    worker.set_viewer_count(1)
+    for pose in (home_qpos, moved_pose(home_qpos)):
+        worker.offer_qpos(pose)
+        start = worker.state()["frames"]
+        wait_for(lambda: worker.state()["frames"] >= start + 3)
+        image = np.asarray(Image.open(io.BytesIO(worker.latest_frame[1])))
+        for name, tile in (("옆에서", image[:, :200]), ("비스듬히", image[:, 200:])):
+            top = tile[:8]  # 위쪽 8줄(칸 높이 150의 약 5%)
+            assert (top.max(axis=(1, 2)) > 40).all(), f"{name}: 위쪽에 검은 줄이 있다"
+            assert top.mean() > 60, name
+
+    # 검사가 빈 것이 아님: 이전 카메라와 시야각(45°)에서는 같은 검사가 검은 띠를 잡아낸다
+    model = aux_mesh.build_model(config.SCENE_PATH, ac.AUX_MESH_FRACTION)  # 시야각을 안 바꾼 모델(45°)
+    data = mujoco.MjData(model)
+    data.qpos[:13] = home_qpos
+    mujoco.mj_forward(model, data)
+    old_camera = make_free_camera(clamp_view(azimuth_deg=105.0, elevation_deg=-10.0, distance_m=0.8), (0.23, 0.0, 0.10))
+    with mujoco.Renderer(model, 150, 200) as renderer:
+        for _ in range(2):
+            renderer.update_scene(data, camera=old_camera)
+            old = renderer.render()
+    assert (old[:8].max(axis=(1, 2)) < 12).all(), "이전 카메라에서 검은 띠가 재현되지 않으면 이 검사는 의미가 없다"
+
+
+def test_main_model_fovy_is_unchanged_and_only_the_aux_model_is_telephoto(make_worker):
+    assert 0.0 < ac.AUX_FOVY_DEG < 45.0
+    aux_model = build_aux_model(config.SCENE_PATH, ac.AUX_MESH_FRACTION)
+    assert aux_model.vis.global_.fovy == ac.AUX_FOVY_DEG == 20.0
+    # 메시만 줄이는 aux_mesh.build_model은 시야각을 건드리지 않는다
+    assert aux_mesh.build_model(config.SCENE_PATH, ac.AUX_MESH_FRACTION).vis.global_.fovy == 45.0
+    # aux 워커가 돌아간 뒤에 새로 읽은 시뮬레이션 모델과 학습용 StateRenderer의 모델은 config(scene.xml)의 45° 그대로다
+    worker = make_worker(fps=30.0)
+    worker.set_viewer_count(1)
+    wait_for(lambda: worker.state()["running"])
+    assert mujoco.MjModel.from_xml_path(str(config.SCENE_PATH)).vis.global_.fovy == 45.0
+    with StateRenderer() as state_renderer:
+        assert state_renderer.model.vis.global_.fovy == 45.0
+
+
+HAVE_RAW = (config.RECORD_DIR / "episode_000019.npz").exists()
+BLOCK_HEIGHT_MIN_FRACTION = 0.125  # 사용자가 메인 화면을 직접 확대한 모습의 블록 높이(칸 높이 대비 중앙값 12.5%)를 기준으로 삼았다
+
+
+def demo_work_frames(n: int = 120) -> np.ndarray:
+    """시연 24개에서 집게 끝과 블록이 15cm 안인 프레임을 고정 시드로 n개 뽑는다(qpos 13개). data/raw는 읽기만 한다."""
+    base = mujoco.MjModel.from_xml_path(str(config.SCENE_PATH))
+    data = mujoco.MjData(base)
+    site_id, block_id = base.site(TIP_SITE).id, base.body("block").id
+    store = EpisodeStore()
+    frames, near = [], []
+    for meta in store.scan():
+        for qpos in store.load_arrays(meta["episode_index"])["qpos"][::3]:
+            data.qpos[:13] = qpos
+            mujoco.mj_kinematics(base, data)
+            frames.append(qpos)
+            near.append(np.linalg.norm(data.site_xpos[site_id] - data.xpos[block_id]) < 0.15)
+    frames, near = np.array(frames), np.array(near)
+    return frames[np.random.default_rng(0).choice(np.nonzero(near)[0], size=n, replace=False)]
+
+
+def block_height_fractions(model: mujoco.MjModel, cameras: list, frames: np.ndarray, view_w_px: int, view_h_px: int) -> list[list[float | None]]:
+    """칸마다, 프레임마다 블록(빨간 픽셀 상자)의 높이 / 칸 높이. 안 보이면 None. 실제 aux 렌더러(_MultiViewRenderer)로 그린다."""
+    data = mujoco.MjData(model)
+    renderer = _MultiViewRenderer(model, view_w_px, view_h_px, len(cameras))
+    out: list[list[float | None]] = [[] for _ in cameras]
+    try:
+        for index, qpos in enumerate([frames[0], *frames]):  # 첫 렌더링은 버린다(docs/07)
+            data.qpos[:13] = qpos
+            data.qvel[:] = 0.0
+            mujoco.mj_forward(model, data)
+            image = renderer.render(data, cameras)
+            if index == 0:
+                continue
+            for i in range(len(cameras)):
+                tile = image[:, i * view_w_px : (i + 1) * view_w_px]
+                ys, _ = np.nonzero((tile[..., 0] > 120) & (tile[..., 1] < 90) & (tile[..., 2] < 90))
+                out[i].append(None if len(ys) < 4 else float(ys.max() - ys.min() + 1) / view_h_px)
+    finally:
+        renderer.close()
+    return out
+
+
+@pytest.mark.skipif(not HAVE_RAW, reason="data/raw가 이 컴퓨터에 없음")
+def test_block_is_at_least_12_5_percent_of_the_tile_height_on_demo_frames():
+    """시연 작업 프레임 120개: 두 칸 모두 블록 높이의 중앙값이 칸 높이의 12.5% 이상이고, 블록이 보이는 프레임이 85% 이상이다.
+    측정(2026-11-13, 200x150): 옆에서 중앙값 15.3%(보임 100%), 비스듬히 12.7%(보임 87.5%). 기준 화면(사용자 메인 확대)은 중앙값 12.5%, 보임 99%.
+    비스듬히는 중앙값 여유가 0.2%p뿐이다(거리 0.8 m이면 15%, 방위각 70°·거리 0.8 m이면 보임 100%). aux_view_config.AUX_CAMERAS."""
+    frames = demo_work_frames()
+    view_w_px, view_h_px = ac.AUX_SIZE_LEVELS["normal"]
+    model = build_aux_model(config.SCENE_PATH, ac.AUX_MESH_FRACTION)
+    fractions = block_height_fractions(model, make_aux_cameras(), frames, view_w_px, view_h_px)
+    for name, per_frame in zip(("옆에서", "비스듬히"), fractions, strict=True):
+        visible = [f for f in per_frame if f is not None]
+        assert len(visible) / len(per_frame) >= 0.85, (name, len(visible) / len(per_frame))
+        assert float(np.median(visible)) >= BLOCK_HEIGHT_MIN_FRACTION, (name, float(np.median(visible)))
+
+    # 검사가 빈 것이 아님: 이전 카메라(시야 45°, 거리 0.8 m)에서는 블록이 칸 높이의 약 6~8%라서 같은 기준에 못 미친다
+    plain = aux_mesh.build_model(config.SCENE_PATH, ac.AUX_MESH_FRACTION)
+    old_cameras = [
+        make_free_camera(clamp_view(azimuth_deg=105.0, elevation_deg=-10.0, distance_m=0.8), (0.23, 0.0, 0.10)),
+        make_free_camera(clamp_view(azimuth_deg=45.0, elevation_deg=-25.0, distance_m=0.8), (0.23, 0.0, 0.10)),
+    ]
+    old = block_height_fractions(plain, old_cameras, frames[:40], view_w_px, view_h_px)
+    for per_frame in old:
+        visible = [f for f in per_frame if f is not None]
+        assert float(np.median(visible)) < 0.10
 
 
 def test_reduced_mesh_model_is_built_once_at_start_with_the_configured_fraction(monkeypatch, home_qpos):

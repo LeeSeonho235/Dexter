@@ -7,7 +7,7 @@ import AuxMirrors from './AuxMirrors.jsx'
 import SimView from './SimView.jsx'
 
 const VIEW = { azimuth_deg: 110, elevation_deg: -35, distance_m: 0.8 }
-const FRAME = { seq: 1, w: 320, h: 120, views: 2, src: 'data:image/jpeg;base64,AAAA', receivedMs: 0 }
+const FRAME = { seq: 1, w: 400, h: 150, views: 2, src: 'data:image/jpeg;base64,AAAA', receivedMs: 0 }
 const AUX_STATE = { enabled: true, running: true, error: null, slowed: false, fps: 10, viewers: 1 }
 
 function render(props = {}) {
@@ -29,11 +29,11 @@ describe('AuxMirrors', () => {
     expect(html).toContain('class="aux-mirrors"')
     const [side, oblique] = AUX_TILES.map((t) => t.label)
     expect(html.indexOf(side)).toBeLessThan(html.indexOf(oblique)) // 왼쪽 칸이 먼저
-    expect(html).toContain(`bottom:${AUX_MARGIN_PX}px;left:${AUX_MARGIN_PX}px;width:160px;height:120px`)
-    expect(html).toContain(`bottom:${AUX_MARGIN_PX}px;right:${AUX_MARGIN_PX}px;width:160px;height:120px`)
+    expect(html).toContain(`bottom:${AUX_MARGIN_PX}px;left:${AUX_MARGIN_PX}px;width:200px;height:150px`)
+    expect(html).toContain(`bottom:${AUX_MARGIN_PX}px;right:${AUX_MARGIN_PX}px;width:200px;height:150px`)
     expect(html).toContain('background-position:0px 0px')
-    expect(html).toContain('background-position:-160px 0px')
-    expect(html).toContain('background-size:320px 120px')
+    expect(html).toContain('background-position:-200px 0px')
+    expect(html).toContain('background-size:400px 150px')
     expect(html).toContain('data:image/jpeg;base64,AAAA')
   })
 })
