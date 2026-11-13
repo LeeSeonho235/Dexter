@@ -1,9 +1,10 @@
 """보조 카메라(2-6)가 시뮬레이션 틱과 메인 화면을 얼마나 늦추는지 재는 도구(브라우저·WebSocket 없이 서버 내부 객체를 직접 돌린다).
 
-실행(CPU만 쓴다. 정방향과 역방향을 따로 돌려 순서 효과를 본다. 한 번에 약 4분이라 5분 안이다):
+실행(CPU만 쓴다. 정방향과 역방향을 따로 돌려 순서 효과를 본다. 한 번에 5분 안이다):
     cd ~/handover && MUJOCO_GL=egl server/.venv/bin/python -m server.aux_view_bench --order ABFCEDGH --out <폴더>   # 정방향
     cd ~/handover && MUJOCO_GL=egl server/.venv/bin/python -m server.aux_view_bench --order HGDECFBA --out <폴더>   # 역방향
---order로 일부만 돌려도 된다(예: --order BC). 합격 기준 숫자는 제안값이다(CRITERIA_PROVISIONAL). 1차 결과를 본 뒤 확정한다.
+    cd ~/handover && MUJOCO_GL=egl server/.venv/bin/python -m server.aux_view_bench --order GH --auto-seeds 0,1,2 --out <폴더>   # AUTO만, 시드 3개
+--order로 일부만 돌려도 된다(예: --order BC).
 
 실제 서버와 같은 연결을 쓴다: SimWorker.attach_aux(실제 AuxViewWorker)가 틱마다 qpos 사본을 넘긴다(임시 feeder 스레드는 없다).
 SimWorker, ControlWorker, RecordingService, AutoRunner를 server/app.py와 같은 방식으로 이어 붙이고 손 입력은 가짜 숫자(원을 그리는 손목, 웹캠 아님).
@@ -13,7 +14,9 @@ SimWorker, ControlWorker, RecordingService, AutoRunner를 server/app.py와 같�
   G AUTO(실제 체크포인트), 메인 화면, aux 꺼짐                    H AUTO + aux 보는 연결 1 (AUX_PAUSE_DURING_AUTO 기본 False)
 비교 쌍: F-B, C-B, E-B(녹화 자체의 비용), D-E, H-G.
 AUTO는 실제 정책 프로세스(server/auto_config.py의 체크포인트, train/.venv)를 쓴다. 가짜 정책은 쓰지 않는다. 체크포인트나 파이썬이 없거나
-정책이 시작되지 않으면 이유를 출력하고 그 조건은 error로 남긴다. G와 H는 같은 시드(--auto-seed)로 돌려서 정책 동작을 비슷하게 맞춘다.
+정책이 시작되지 않으면 이유를 출력하고 그 조건은 error로 남긴다.
+AUTO 시드 여러 개(--auto-seeds): 시드마다 G와 H를 짝으로 이어서 돈다(시드0 G,H → 시드1 G,H …. 역방향이면 H,G). 같은 시드라서 정책 동작이 비슷하다.
+  조건별 결과는 시드를 모두 합친 틱 간격으로 p50/p95 등을 낸다(AUTO 에피소드 하나는 약 8초라 틱이 약 230개뿐이어서 합친다). 시드별 값도 같이 낸다.
 틱 간격 = 시뮬레이션 스레드의 틱 시작 사이 벽시계 시간(ms). 메인 렌더 틱은 약 55 ms라서 최대값은 비교에 쓰지 않고 p50/p95와 50 ms 초과 비율을 본다.
 AUTO 중에는 정책을 기다리는 틱이 길어진다(약 140 ms). G와 H에 똑같이 들어가므로 H-G 차이만 본다.
 메인 fps = 측정 구간의 SimWorker.frames_rendered 증가 ÷ 벽시계. CPU = 이 프로세스의 CPU 시간 ÷ 벽시계(코어 수).
@@ -52,13 +55,13 @@ from server.record_bench import HandFeeder, wait_until  # noqa: E402
 from server.recording import RecordingService  # noqa: E402
 from server.sim_worker import SimWorker, TickStats  # noqa: E402
 
-# 합격 기준 "제안값". 1차 결과를 본 뒤 사용자와 함께 확정한다(확정 전에는 판정이 아니라 참고 표시).
-CRITERIA_PROVISIONAL = {
-    "tick_p95_ms_over_base": 2.0,  # 비교 대상보다 틱 간격 p95가 이만큼(ms)보다 더 늘면 안 된다
-    "over50_pct_points_over_base": 1.0,  # 50 ms 초과 비율(%)이 이만큼(%p)보다 더 늘면 안 된다
-    "main_fps_drop_max": 1.0,  # 메인 fps가 이만큼보다 더 떨어지면 안 된다
-    "cpu_cores_over_base": 0.4,  # CPU가 이만큼(코어)보다 더 늘면 안 된다
-    "aux_render_p95_ms_max": ac.AUX_MAX_RENDER_MS,  # aux 렌더+JPEG p95가 감속 기준 이하
+# 합격 기준(2026-11-13 사용자와 확정). 비교 쌍마다 "후보가 비교 대상보다 이만큼 이상 나빠지면 안 된다".
+CRITERIA = {
+    "tick_p95_ms_over_base": 3.0,  # 틱 간격 p95 증가(ms)
+    "over50_pct_points_over_base": 3.0,  # 50 ms 초과 비율 증가(%p)
+    "main_fps_drop_max": 0.5,  # 메인 fps 감소
+    "cpu_cores_over_base": 0.5,  # CPU 증가(코어)
+    "aux_render_p95_ms_max": 40.0,  # aux 렌더+JPEG p95(ms). 설정의 AUX_MAX_RENDER_MS(감속 기준)와 같은 값
     "aux_fps_min": 8.0,  # 보는 연결이 있을 때 aux가 실제로 내는 fps(설정 10)
 }
 
@@ -118,8 +121,50 @@ def pct(values: list[float], q: float) -> float | None:
     return round(float(np.percentile(values, q)), 2) if values else None
 
 
+def stats_from_raw(raw: dict, aux_state: dict) -> dict:
+    """원자료(raw) 하나에서 보고용 통계를 만든다. 측정 하나와 합친 여러 측정이 같은 계산을 쓴다."""
+    intervals = raw["intervals_ms"]
+    wall = raw["wall_s"]
+    result = {
+        "measured_s": round(wall, 2),
+        "ticks": len(intervals),
+        "tick_mean_ms": round(float(np.mean(intervals)), 2) if intervals else None,
+        "tick_p50_ms": pct(intervals, 50),
+        "tick_p95_ms": pct(intervals, 95),
+        "tick_p99_ms": pct(intervals, 99),
+        "tick_over50_pct": round(100.0 * sum(ms > 50.0 for ms in intervals) / len(intervals), 2) if intervals else None,
+        "main_fps": round(raw["main_frames"] / wall, 2),
+        "cpu_cores": round(raw["cpu_s"] / wall, 3),
+        "aux_state": aux_state,
+    }
+    if raw["render_ms"]:
+        result.update(
+            aux_frames=len(raw["render_ms"]),
+            aux_fps=round(raw["aux_gaps"] / raw["aux_span_s"], 2) if raw["aux_span_s"] > 0 else None,
+            aux_render_p50_ms=pct(raw["render_ms"], 50),
+            aux_render_p95_ms=pct(raw["render_ms"], 95),
+            aux_jpeg_kb_mean=round(float(np.mean(raw["jpeg_bytes"])) / 1024.0, 2),
+            aux_jpeg_kb_max=round(max(raw["jpeg_bytes"]) / 1024.0, 2),
+        )
+    return result
+
+
+def pool_raw(raws: list[dict]) -> dict:
+    """여러 측정(시드마다 한 번씩)의 원자료를 합친다: 틱 간격, aux 렌더 시간은 이어 붙이고 시간과 개수는 더한다."""
+    return {
+        "intervals_ms": [v for raw in raws for v in raw["intervals_ms"]],
+        "render_ms": [v for raw in raws for v in raw["render_ms"]],
+        "jpeg_bytes": [v for raw in raws for v in raw["jpeg_bytes"]],
+        "aux_gaps": sum(raw["aux_gaps"] for raw in raws),
+        "aux_span_s": sum(raw["aux_span_s"] for raw in raws),
+        "cpu_s": sum(raw["cpu_s"] for raw in raws),
+        "wall_s": sum(raw["wall_s"] for raw in raws),
+        "main_frames": sum(raw["main_frames"] for raw in raws),
+    }
+
+
 def measure(sim: SimWorker, aux: AuxViewWorker, log: FrameLog, seconds: float, stop_early=None, poll_s: float = 0.1) -> dict:
-    """seconds 동안(또는 stop_early()가 참이 될 때까지) 틱 간격, 메인 fps, CPU, aux 렌더를 모은다."""
+    """seconds 동안(또는 stop_early()가 참이 될 때까지) 틱 간격, 메인 fps, CPU, aux 렌더를 모은다. 결과에 원자료("_raw")가 들어 있다."""
     sim.tick_stats.reset()
     log.clear()
     log.recording = True
@@ -132,36 +177,25 @@ def measure(sim: SimWorker, aux: AuxViewWorker, log: FrameLog, seconds: float, s
         time.sleep(min(poll_s, seconds - elapsed))
     cpu, wall = time.process_time() - cpu0, time.monotonic() - wall0
     log.recording = False
-    frames = sim.frames_rendered - frames0
-    intervals = list(sim.tick_stats.intervals_ms)
-    result = {
-        "measured_s": round(wall, 2),
-        "ticks": len(intervals),
-        "tick_mean_ms": round(float(np.mean(intervals)), 2) if intervals else None,
-        "tick_p50_ms": pct(intervals, 50),
-        "tick_p95_ms": pct(intervals, 95),
-        "tick_p99_ms": pct(intervals, 99),
-        "tick_over50_pct": round(100.0 * sum(ms > 50.0 for ms in intervals) / len(intervals), 2) if intervals else None,
-        "main_fps": round(frames / wall, 2),
-        "cpu_cores": round(cpu / wall, 3),
-        "aux_state": aux.state(),
+    times = list(log.times_s)
+    raw = {
+        "intervals_ms": list(sim.tick_stats.intervals_ms),
+        "render_ms": list(log.render_ms),
+        "jpeg_bytes": list(log.jpeg_bytes),
+        "aux_gaps": max(len(times) - 1, 0),
+        "aux_span_s": (times[-1] - times[0]) if len(times) > 1 else 0.0,
+        "cpu_s": cpu,
+        "wall_s": wall,
+        "main_frames": sim.frames_rendered - frames0,
     }
-    if log.times_s:
-        span_s = log.times_s[-1] - log.times_s[0]
-        result.update(
-            aux_frames=len(log.times_s),
-            aux_fps=round((len(log.times_s) - 1) / span_s, 2) if span_s > 0 and len(log.times_s) > 1 else None,
-            aux_render_p50_ms=pct(log.render_ms, 50),
-            aux_render_p95_ms=pct(log.render_ms, 95),
-            aux_jpeg_kb_mean=round(float(np.mean(log.jpeg_bytes)) / 1024.0, 2),
-            aux_jpeg_kb_max=round(max(log.jpeg_bytes) / 1024.0, 2),
-        )
+    result = stats_from_raw(raw, aux.state())
+    result["_raw"] = raw
     return result
 
 
-def provisional_check(results: dict[str, dict]) -> dict[str, dict[str, bool]]:
-    """비교 쌍(PAIRS)마다 제안 기준 확인. 확정 전의 참고용이다. 측정이 실패했거나 대조가 없으면 그 쌍은 건너뛴다."""
-    c = CRITERIA_PROVISIONAL
+def check_criteria(results: dict[str, dict]) -> dict[str, dict[str, bool]]:
+    """비교 쌍(PAIRS)마다 확정 기준 확인. 측정이 실패했거나 대조가 없으면 그 쌍은 건너뛴다."""
+    c = CRITERIA
     out: dict[str, dict[str, bool]] = {}
     for key, base_key in PAIRS.items():
         r, base = results.get(key), results.get(base_key)
@@ -184,9 +218,65 @@ def provisional_check(results: dict[str, dict]) -> dict[str, dict[str, bool]]:
     return out
 
 
-def estimate_seconds(order: str, seconds: float, warmup: float) -> float:
-    per = [warmup + seconds + EXTRA_S[CONDITIONS[key]["mode"]] + (1.0 if CONDITIONS[key]["aux"] != "off" else 0.0) for key in order]
-    return sum(per) + 5.0
+def parse_seeds(text: str) -> list[int]:
+    """"0,1,2" → [0, 1, 2]. 시연 시드 범위(config.DEMO_SEED_RANGE) 안의 겹치지 않는 정수만 받는다."""
+    try:
+        seeds = [int(part) for part in text.split(",") if part.strip() != ""]
+    except ValueError:
+        raise ValueError(f"시드는 쉼표로 구분한 정수여야 한다: {text!r}") from None
+    lo, hi = config.DEMO_SEED_RANGE
+    if not seeds or len(set(seeds)) != len(seeds) or any(not lo <= s < hi for s in seeds):
+        raise ValueError(f"시드는 {lo}~{hi - 1} 안의 겹치지 않는 정수 하나 이상이어야 한다: {text!r}")
+    return seeds
+
+
+def build_plan(order: str, seeds: list[int]) -> list[tuple[str, int | None]]:
+    """(조건, 시드) 실행 목록. AUTO가 아닌 조건은 시드가 None이고 한 번. 이어진 AUTO 조건들은 시드마다 묶어서 돈다(시드0 G,H → 시드1 G,H …)."""
+    plan: list[tuple[str, int | None]] = []
+    i = 0
+    while i < len(order):
+        if CONDITIONS[order[i]]["mode"] != "auto":
+            plan.append((order[i], None))
+            i += 1
+            continue
+        j = i
+        while j < len(order) and CONDITIONS[order[j]]["mode"] == "auto":
+            j += 1
+        for seed in seeds:
+            plan.extend((key, seed) for key in order[i:j])
+        i = j
+    return plan
+
+
+def auto_pair_table(runs: list[dict]) -> list[dict]:
+    """시드마다 H-G 차이(틱 p95 ms, 50ms 초과 %p, 메인 fps, CPU 코어). runs 항목: {"key", "seed", "result"}. 둘 다 측정된 시드만."""
+    by = {(run["key"], run["seed"]): run["result"] for run in runs if run["seed"] is not None}
+    rows = []
+    for seed in sorted({seed for _, seed in by}):
+        g, h = by.get(("G", seed)), by.get(("H", seed))
+        if not g or not h or "error" in g or "error" in h:
+            continue
+        rows.append(
+            {
+                "seed": seed,
+                "ticks_g": g["ticks"], "ticks_h": h["ticks"],
+                "d_tick_p95_ms": round(h["tick_p95_ms"] - g["tick_p95_ms"], 2),
+                "d_over50_pct_points": round(h["tick_over50_pct"] - g["tick_over50_pct"], 2),
+                "d_main_fps": round(h["main_fps"] - g["main_fps"], 2),
+                "d_cpu_cores": round(h["cpu_cores"] - g["cpu_cores"], 3),
+            }
+        )
+    return rows
+
+
+def estimate_seconds(order: str, seconds: float, warmup: float, n_seeds: int = 1) -> float:
+    """상한에 가까운 예상(s). AUTO는 에피소드가 길어져 --seconds를 다 쓰는 경우를 센다(실제로는 정책이 일찍 성공하면 더 짧다)."""
+    total = 5.0
+    for key in order:
+        spec = CONDITIONS[key]
+        runs = n_seeds if spec["mode"] == "auto" else 1
+        total += runs * (warmup + seconds + EXTRA_S[spec["mode"]] + (1.0 if spec["aux"] != "off" else 0.0))
+    return total
 
 
 def preflight_auto() -> str | None:
@@ -200,8 +290,8 @@ def preflight_auto() -> str | None:
 class Bench:
     """서버 안쪽 객체를 app.py와 같은 방식으로 이어 붙이고 조건마다 aux, 녹화, AUTO를 바꿔 가며 잰다."""
 
-    def __init__(self, work_dir: Path, need_auto: bool, auto_seed: int, seconds: float, warmup: float) -> None:
-        self.seconds, self.warmup, self.auto_seed = seconds, warmup, auto_seed
+    def __init__(self, work_dir: Path, need_auto: bool, seconds: float, warmup: float) -> None:
+        self.seconds, self.warmup = seconds, warmup
         self.sim = SimWorker(
             config.SCENE_PATH, keyframe=config.START_KEYFRAME, camera=config.CAMERA, width_px=config.RENDER_WIDTH_PX,
             height_px=config.RENDER_HEIGHT_PX, frame_fps=config.FRAME_FPS, jpeg_quality=config.JPEG_QUALITY,
@@ -245,9 +335,9 @@ class Bench:
         self.control.stop()
         self.sim.stop()
 
-    # --- 한 조건 ---
+    # --- 한 조건(AUTO면 한 시드) ---
 
-    def run(self, key: str) -> dict:
+    def run(self, key: str, seed: int | None = None) -> dict:
         spec = CONDITIONS[key]
         aux = self.off_aux
         if spec["aux"] != "off":
@@ -263,7 +353,7 @@ class Bench:
             if spec["mode"] == "record":
                 return self._run_record(aux)
             if spec["mode"] == "auto":
-                return self._run_auto(aux)
+                return self._run_auto(aux, 0 if seed is None else seed)
             time.sleep(self.warmup)
             return measure(self.sim, aux, self.log, self.seconds)
         finally:
@@ -298,16 +388,16 @@ class Bench:
         wait_until(lambda: self.service.state()["pending_writes"] == 0, 15.0)
         return result
 
-    def _run_auto(self, aux: AuxViewWorker) -> dict:
+    def _run_auto(self, aux: AuxViewWorker, seed: int) -> dict:
         assert self.auto is not None
-        reason = self._reset_block(self.auto_seed)
+        reason = self._reset_block(seed)
         if reason is not None:
             return {"error": reason}
         refusal = self.auto.handle("start")
         if refusal is not None:
             return {"error": f"AUTO 시작 거절: {refusal}"}
         deadline = time.monotonic() + auto_config.POLICY_START_TIMEOUT_S + 15.0
-        while True:  # 정책 프로세스 시작(첫 조건에서만 약 3초)과 에피소드 시작을 기다린다
+        while True:  # 정책 프로세스 시작(첫 실행에서만 약 3초)과 에피소드 시작을 기다린다
             state = self.auto.state()
             if state["status"] == "running":
                 break
@@ -317,7 +407,7 @@ class Bench:
         time.sleep(self.warmup)
         result = measure(self.sim, aux, self.log, self.seconds, stop_early=lambda: self.auto.state()["status"] != "running")
         status = self.auto.state()["status"]
-        result["auto"] = {"seed": self.auto_seed, "status_at_window_end": status, "finished_early": status != "running"}
+        result["auto"] = {"seed": seed, "status_at_window_end": status, "finished_early": status != "running"}
         if status == "running":
             self.auto.handle("stop")
         wait_until(lambda: self.auto.state()["status"] != "running", 15.0)
@@ -328,10 +418,10 @@ class Bench:
 
 def print_row(key: str, label: str, r: dict) -> None:
     if "error" in r:
-        print(f"{label:<30} 측정 실패: {r['error']}")
+        print(f"{label:<34} 측정 실패: {r['error']}")
         return
     line = (
-        f"{label:<30} 틱 p50 {r['tick_p50_ms']:6.2f}  p95 {r['tick_p95_ms']:6.2f}  >50ms {r['tick_over50_pct']:5.2f}%  "
+        f"{label:<34} 틱 p50 {r['tick_p50_ms']:6.2f}  p95 {r['tick_p95_ms']:6.2f}  >50ms {r['tick_over50_pct']:5.2f}%  "
         f"메인 {r['main_fps']:5.2f}fps  CPU {r['cpu_cores']:.2f}코어  ({r['measured_s']}s, 틱 {r['ticks']})"
     )
     if r.get("aux_frames"):
@@ -346,17 +436,25 @@ def print_row(key: str, label: str, r: dict) -> None:
     print(line)
 
 
+def strip_raw(result: dict) -> dict:
+    return {k: v for k, v in result.items() if k != "_raw"}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--seconds", type=float, default=20.0, help="조건마다 재는 시간(s). AUTO는 에피소드가 먼저 끝나면 거기까지")
     parser.add_argument("--warmup", type=float, default=3.0, help="조건을 바꾼 뒤 재기 전에 기다리는 시간(s)")
     parser.add_argument("--order", default="ABFCEDGH", help="돌릴 조건과 순서(A, B, F, C, E, D, G, H 중). 일부만 줘도 된다")
-    parser.add_argument("--auto-seed", type=int, default=0, help="G, H가 쓰는 시연 시드(0~99). 둘이 같은 시드여야 비교가 된다")
+    parser.add_argument("--auto-seeds", default="0", help="G, H가 쓰는 시연 시드(0~99), 쉼표로 여러 개. 시드마다 G와 H를 짝으로 돈다")
     parser.add_argument("--max-load", type=float, default=50.0, help="시작 전 load average(1분)가 이 값 이상이면 돌리지 않는다")
     parser.add_argument("--out", type=Path, default=None, help="결과 JSON과 임시 저장 폴더를 둘 폴더(기본: 임시 폴더)")
     args = parser.parse_args()
     if not args.order or any(key not in CONDITIONS for key in args.order) or len(set(args.order)) != len(args.order):
         parser.error(f"--order는 {''.join(CONDITIONS)} 중에서 겹치지 않게 쓴다(예: ABFCEDGH, HGDECFBA, BC)")
+    try:
+        seeds = parse_seeds(args.auto_seeds)
+    except ValueError as err:
+        parser.error(str(err))
     need_auto = any(CONDITIONS[key]["mode"] == "auto" for key in args.order)
     if need_auto:
         problem = preflight_auto()
@@ -370,47 +468,73 @@ def main() -> int:
         return 2
     os.nice(19)  # 공용 서버: 다른 사람 작업을 방해하지 않게 가장 낮은 우선순위로
 
-    planned_s = estimate_seconds(args.order, args.seconds, args.warmup)
+    planned_s = estimate_seconds(args.order, args.seconds, args.warmup, len(seeds))
     print(
-        f"조건 {args.order}, 약 {planned_s:.0f}초 예상. load {load_1min:.2f}. 공칭 틱 {1000 / config.SIM_TICK_HZ:.1f} ms, "
+        f"조건 {args.order}{' 시드 ' + ','.join(map(str, seeds)) if need_auto else ''}, 상한 약 {planned_s:.0f}초 예상. load {load_1min:.2f}. 공칭 틱 {1000 / config.SIM_TICK_HZ:.1f} ms, "
         f"메인 화면 {config.FRAME_FPS} fps, aux {ac.AUX_FPS} fps({len(ac.AUX_CAMERA_VIEWS)}시점), AUX_PAUSE_DURING_AUTO={ac.AUX_PAUSE_DURING_AUTO}"
     )
     if planned_s > 300:
-        print("경고: 5분이 넘는다. --order로 나눠 돌리는 것이 좋다.", file=sys.stderr)
+        print("경고: 5분이 넘는다. --order나 --auto-seeds를 줄여 나눠 돌리는 것이 좋다.", file=sys.stderr)
 
     out_dir = args.out or Path(tempfile.mkdtemp(prefix="aux_bench_"))
     out_dir.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
-    bench = Bench(out_dir / "work", need_auto, args.auto_seed, args.seconds, args.warmup)
-    results: dict[str, dict] = {}
+    bench = Bench(out_dir / "work", need_auto, args.seconds, args.warmup)
+    runs: list[dict] = []
     try:
         time.sleep(2.0)  # 팔이 움직이기 시작하고 안정될 시간
-        for key in args.order:
-            results[key] = bench.run(key)
-            print_row(key, CONDITIONS[key]["label"], results[key])
+        for key, seed in build_plan(args.order, seeds):
+            result = bench.run(key, seed)
+            runs.append({"key": key, "seed": seed, "result": result})
+            print_row(key, CONDITIONS[key]["label"] + (f" [시드 {seed}]" if seed is not None else ""), result)
             sys.stdout.flush()
     finally:
         bench.close()
 
-    checks = provisional_check(results)
+    # 조건별 결과: 같은 조건의 측정(AUTO는 시드마다 한 번씩)을 합친다.
+    results: dict[str, dict] = {}
+    for key in args.order:
+        mine = [run["result"] for run in runs if run["key"] == key]
+        good = [r for r in mine if "error" not in r]
+        if len(mine) == 1 or not good:
+            results[key] = strip_raw(mine[0]) if good else (mine[0] if mine else {"error": "측정 안 됨"})
+            continue
+        pooled = stats_from_raw(pool_raw([r["_raw"] for r in good]), good[-1]["aux_state"])
+        pooled["runs"] = len(good)
+        pooled["auto_runs"] = [r["auto"] for r in good]
+        pooled["errors"] = [r["error"] for r in mine if "error" in r]
+        results[key] = pooled
+    if need_auto and len(seeds) > 1:
+        print("\n조건별 합친 결과(시드 " + ",".join(map(str, seeds)) + "):")
+        for key in args.order:
+            if CONDITIONS[key]["mode"] == "auto":
+                print_row(key, CONDITIONS[key]["label"] + " [합침]", results[key])
+    table = auto_pair_table(runs)
+    if table:
+        print("\n시드별 H-G 차이 (틱 p95 ms / 50ms 초과 %p / 메인 fps / CPU 코어):")
+        for row in table:
+            print(f"  시드 {row['seed']}: {row['d_tick_p95_ms']:+.2f} / {row['d_over50_pct_points']:+.2f} / {row['d_main_fps']:+.2f} / {row['d_cpu_cores']:+.3f}  (틱 G {row['ticks_g']}, H {row['ticks_h']})")
+
+    checks = check_criteria(results)
     if checks:
-        print("\n제안 기준(확정 전, 참고) 대비 O/X — 짝: " + ", ".join(f"{k}-{PAIRS[k]}" for k in checks))
+        print("\n확정 기준 대비 O/X — 짝: " + ", ".join(f"{k}-{PAIRS[k]}" for k in checks))
         for key, items in checks.items():
             print(f"  {key}-{PAIRS[key]}: " + "  ".join(f"{name} {'O' if ok else 'X'}" for name, ok in items.items()))
     else:
-        print("\n제안 기준 비교는 짝(F-B, C-B, E-B, D-E, H-G)이 같이 측정됐을 때만 나온다.")
+        print("\n기준 비교는 짝(F-B, C-B, E-B, D-E, H-G)이 같이 측정됐을 때만 나온다.")
 
     elapsed_s = round(time.monotonic() - started, 1)
     out_path = out_dir / f"aux_bench_{args.order}_{time.strftime('%Y%m%d_%H%M%S')}.json"
     payload = {
-        "order": args.order, "seconds": args.seconds, "warmup": args.warmup, "auto_seed": args.auto_seed, "load_1min_at_start": load_1min,
+        "order": args.order, "seconds": args.seconds, "warmup": args.warmup, "auto_seeds": seeds, "load_1min_at_start": load_1min,
         "elapsed_s": elapsed_s,
         "settings": {
             "AUX_FPS": ac.AUX_FPS, "AUX_SIZE_LEVELS": ac.AUX_SIZE_LEVELS, "AUX_JPEG_QUALITY": ac.AUX_JPEG_QUALITY, "AUX_MAX_RENDER_MS": ac.AUX_MAX_RENDER_MS,
             "AUX_MESH_FRACTION": ac.AUX_MESH_FRACTION, "AUX_PAUSE_DURING_AUTO": ac.AUX_PAUSE_DURING_AUTO, "SIM_TICK_HZ": config.SIM_TICK_HZ,
             "FRAME_FPS": config.FRAME_FPS, "POLICY_CHECKPOINT": str(auto_config.POLICY_CHECKPOINT),
         },
-        "criteria_provisional": CRITERIA_PROVISIONAL, "pairs": PAIRS, "results": results, "provisional_checks": checks,
+        "criteria": CRITERIA, "pairs": PAIRS, "results": results, "checks": checks, "auto_pair_table": table,
+        "runs": [{"key": run["key"], "seed": run["seed"], "result": strip_raw(run["result"])} for run in runs],
     }
     out_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"\n결과 파일: {out_path}  (걸린 시간 {elapsed_s} s)")

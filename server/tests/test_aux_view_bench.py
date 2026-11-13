@@ -1,13 +1,15 @@
 """server/aux_view_bench.py의 측정 없이 확인할 수 있는 부분: 통계 수집, 비교 쌍과 제안 기준, 인자 검사, 부하·체크포인트 거부, 조건표.
 실제 측정(SimWorker, aux, 정책 프로세스를 띄워 도는 것)은 이 테스트에서 하지 않는다."""
 
+import os
 import sys
 import time
 
 import pytest
 
-from server import aux_view_bench as bench
 from server import auto_config
+from server import aux_view_bench as bench
+from server import aux_view_config as ac
 
 
 def test_recording_tick_stats_keeps_all_intervals_and_resets():
@@ -90,53 +92,58 @@ def test_pairs_reference_known_conditions_and_g_h_differ_only_in_aux():
     assert bench.PAIRS == {"F": "B", "C": "B", "E": "B", "D": "E", "H": "G"}
 
 
-def test_provisional_check_passes_and_flags_each_criterion():
+def test_check_criteria_passes_and_flags_each_criterion():
     base = make_result(55.0, 5.0, 1.5)
-    ok = bench.provisional_check({"B": base, "C": make_result(56.0, 5.5, 1.8, aux=GOOD_AUX)})
+    ok = bench.check_criteria({"B": base, "C": make_result(56.0, 5.5, 1.8, aux=GOOD_AUX)})
     assert all(ok["C"].values()), ok
 
-    worse = bench.provisional_check({
+    edge = bench.check_criteria({"B": base, "C": make_result(58.0, 8.0, 2.0, fps=14.5, aux=GOOD_AUX)})  # 정확히 기준값(+3, +3, -0.5, +0.5)은 통과
+    assert all(edge["C"].values()), edge
+
+    worse = bench.check_criteria({
         "B": base,
-        "C": make_result(58.0, 7.0, 2.0, fps=13.0, aux={"aux_frames": 100, "aux_render_p95_ms": 45.0, "aux_fps": 4.0}, slowed=True),
-    })
+        "C": make_result(58.1, 8.1, 2.01, fps=14.4, aux={"aux_frames": 100, "aux_render_p95_ms": 40.1, "aux_fps": 7.9}, slowed=True),
+    })  # 기준을 조금씩 넘으면 항목마다 실패
     assert worse["C"]["aux_has_frames"] is True  # 프레임은 있었다(그래서 이 항목만 참)
     assert not any(ok for name, ok in worse["C"].items() if name != "aux_has_frames"), worse["C"]
 
 
-def test_provisional_check_uses_the_right_baseline_for_record_and_auto():
+def test_check_criteria_uses_the_right_baseline_for_record_and_auto():
     results = {
-        "B": make_result(55.0, 5.0, 1.5),
-        "E": make_result(56.0, 5.0, 1.6),  # 녹화 자체의 비용(E-B)
-        "D": make_result(57.0, 5.2, 1.9, aux=GOOD_AUX),  # D는 E와 비교한다: B와 비교하면 +2를 넘지만 E와는 안쪽
+        "B": make_result(53.0, 5.0, 1.5),
+        "E": make_result(55.5, 5.0, 1.6),  # 녹화 자체의 비용(E-B)
+        "D": make_result(58.0, 5.2, 1.9, aux=GOOD_AUX),  # D는 E와 비교한다: B와 비교하면 +5로 기준을 넘지만 E와는 +2.5로 안쪽
         "G": make_result(90.0, 40.0, 1.2),
         "H": make_result(91.0, 41.0, 1.5, aux=GOOD_AUX),
     }
-    checks = bench.provisional_check(results)
+    checks = bench.check_criteria(results)
     assert set(checks) == {"E", "D", "H"}  # F, C는 측정 안 했으니 건너뛴다
     assert all(checks["D"].values()) and all(checks["H"].values()) and all(checks["E"].values())
 
 
-def test_provisional_check_flags_an_idle_aux_that_rendered():
+def test_check_criteria_flags_an_idle_aux_that_rendered():
     base = make_result(55.0, 5.0, 1.5)
     quiet = make_result(55.5, 5.0, 1.5)
     quiet["aux_state"]["frames"] = 0
-    assert bench.provisional_check({"B": base, "F": quiet})["F"]["aux_idle_renders_nothing"] is True
+    assert bench.check_criteria({"B": base, "F": quiet})["F"]["aux_idle_renders_nothing"] is True
     noisy = make_result(55.5, 5.0, 1.5)
     noisy["aux_state"]["frames"] = 12  # 보는 연결이 0인데 그렸다면 끄는 장치가 고장 난 것
-    assert bench.provisional_check({"B": base, "F": noisy})["F"]["aux_idle_renders_nothing"] is False
+    assert bench.check_criteria({"B": base, "F": noisy})["F"]["aux_idle_renders_nothing"] is False
 
 
-def test_provisional_check_skips_failed_or_missing_measurements():
+def test_check_criteria_skips_failed_or_missing_measurements():
     ok = make_result(55.0, 5.0, 1.5)
-    assert bench.provisional_check({"C": make_result(56.0, 5.0, 1.6, aux=GOOD_AUX)}) == {}  # 대조 없음
-    assert bench.provisional_check({"B": ok, "C": {"error": "AUTO가 시작되지 않았다"}}) == {}
-    assert bench.provisional_check({"G": {"error": "x"}, "H": make_result(60.0, 5.0, 1.5, aux=GOOD_AUX)}) == {}
+    assert bench.check_criteria({"C": make_result(56.0, 5.0, 1.6, aux=GOOD_AUX)}) == {}  # 대조 없음
+    assert bench.check_criteria({"B": ok, "C": {"error": "AUTO가 시작되지 않았다"}}) == {}
+    assert bench.check_criteria({"G": {"error": "x"}, "H": make_result(60.0, 5.0, 1.5, aux=GOOD_AUX)}) == {}
 
 
-def test_criteria_are_provisional_values():
-    c = bench.CRITERIA_PROVISIONAL
-    assert (c["tick_p95_ms_over_base"], c["over50_pct_points_over_base"], c["main_fps_drop_max"], c["cpu_cores_over_base"]) == (2.0, 1.0, 1.0, 0.4)
-    assert c["aux_fps_min"] == 8.0
+def test_criteria_are_the_values_agreed_on_2026_11_13():
+    c = bench.CRITERIA
+    assert (c["tick_p95_ms_over_base"], c["over50_pct_points_over_base"], c["main_fps_drop_max"], c["cpu_cores_over_base"]) == (3.0, 3.0, 0.5, 0.5)
+    assert (c["aux_render_p95_ms_max"], c["aux_fps_min"]) == (40.0, 8.0)
+    assert c["aux_render_p95_ms_max"] == ac.AUX_MAX_RENDER_MS  # 감속 기준과 같은 값
+    assert ac.AUX_ENABLED is False or "AUX_ENABLED" in os.environ  # 기본 꺼짐 유지
 
 
 def test_estimate_is_under_five_minutes_for_the_full_forward_and_reverse_orders():
@@ -181,3 +188,72 @@ def test_preflight_passes_with_the_real_files_in_this_repo():
     if problem is not None:
         pytest.skip(f"이 컴퓨터에는 AUTO 파일이 없다: {problem}")
     assert problem is None
+
+
+def test_parse_seeds_accepts_only_distinct_demo_seeds():
+    assert bench.parse_seeds("0,1,2") == [0, 1, 2]
+    assert bench.parse_seeds("5") == [5]
+    for bad in ("", "a,b", "1,1", "-1", "100", "1000"):  # 1000은 평가 시드라서 막는다
+        with pytest.raises(ValueError):
+            bench.parse_seeds(bad)
+
+
+def test_bad_auto_seeds_are_rejected_by_the_command_line(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["aux_view_bench", "--order", "GH", "--auto-seeds", "1000"])
+    with pytest.raises(SystemExit):
+        bench.main()
+
+
+def test_plan_pairs_g_and_h_per_seed_and_keeps_other_conditions_once():
+    forward = bench.build_plan("ABFCEDGH", [0, 1, 2])
+    assert forward[:6] == [(key, None) for key in "ABFCED"]
+    assert forward[6:] == [("G", 0), ("H", 0), ("G", 1), ("H", 1), ("G", 2), ("H", 2)]
+    reverse = bench.build_plan("HGDECFBA", [0, 1, 2])
+    assert reverse[:6] == [("H", 0), ("G", 0), ("H", 1), ("G", 1), ("H", 2), ("G", 2)]
+    assert reverse[6:] == [(key, None) for key in "DECFBA"]
+    assert bench.build_plan("GBH", [0, 1]) == [("G", 0), ("G", 1), ("B", None), ("H", 0), ("H", 1)]  # 떨어져 있으면 따로 묶는다
+    assert bench.build_plan("BC", [0, 1, 2]) == [("B", None), ("C", None)]  # AUTO가 없으면 시드는 무관
+
+
+RAW_1 = {"intervals_ms": [30.0, 30.0, 60.0], "render_ms": [10.0, 20.0], "jpeg_bytes": [1024, 2048], "aux_gaps": 1, "aux_span_s": 0.1, "cpu_s": 1.0, "wall_s": 2.0, "main_frames": 30}
+RAW_2 = {"intervals_ms": [31.0, 52.0], "render_ms": [30.0], "jpeg_bytes": [3072], "aux_gaps": 0, "aux_span_s": 0.0, "cpu_s": 3.0, "wall_s": 2.0, "main_frames": 10}
+STATE = {"slowed": False, "error": None, "frames": 3}
+
+
+def test_stats_from_one_raw_and_pooled_raws_use_the_same_calculation():
+    single = bench.stats_from_raw(RAW_1, STATE)
+    assert single["ticks"] == 3 and single["tick_over50_pct"] == pytest.approx(33.33) and single["main_fps"] == 15.0 and single["cpu_cores"] == 0.5
+    assert single["aux_fps"] == 10.0 and single["aux_frames"] == 2
+
+    pooled = bench.stats_from_raw(bench.pool_raw([RAW_1, RAW_2]), STATE)
+    assert pooled["ticks"] == 5 and pooled["measured_s"] == 4.0
+    assert pooled["tick_over50_pct"] == 40.0  # 60, 52 두 개가 50 ms를 넘는다
+    assert pooled["main_fps"] == 10.0 and pooled["cpu_cores"] == 1.0  # (30 + 10) / 4 s, (1 + 3) / 4 s
+    assert pooled["aux_fps"] == 10.0 and pooled["aux_frames"] == 3 and pooled["aux_render_p50_ms"] == 20.0
+    assert pooled["tick_p95_ms"] == bench.pct([30.0, 30.0, 60.0, 31.0, 52.0], 95)  # 틱은 이어 붙여서 백분위를 낸다(평균의 평균이 아니다)
+
+
+def test_pool_of_runs_without_aux_has_no_aux_fields():
+    plain = dict(RAW_1, render_ms=[], jpeg_bytes=[], aux_gaps=0, aux_span_s=0.0)
+    assert "aux_frames" not in bench.stats_from_raw(bench.pool_raw([plain, plain]), STATE)
+
+
+def test_auto_pair_table_gives_per_seed_differences_and_skips_incomplete_pairs():
+    def run(key, seed, p95, over50, fps, cpu, ticks=230):
+        return {"key": key, "seed": seed, "result": {"ticks": ticks, "tick_p95_ms": p95, "tick_over50_pct": over50, "main_fps": fps, "cpu_cores": cpu}}
+
+    runs = [
+        run("G", 0, 46.0, 1.0, 14.5, 1.7), run("H", 0, 47.5, 2.5, 14.3, 2.0),
+        run("G", 1, 45.0, 1.0, 14.6, 1.7), {"key": "H", "seed": 1, "result": {"error": "AUTO가 시작되지 않았다"}},  # 한쪽이 실패한 시드는 뺀다
+        run("H", 2, 47.0, 2.0, 14.5, 2.0),  # G가 없는 시드도 뺀다
+        run("B", None, 45.0, 0.0, 15.0, 1.7),
+    ]
+    assert bench.auto_pair_table(runs) == [
+        {"seed": 0, "ticks_g": 230, "ticks_h": 230, "d_tick_p95_ms": 1.5, "d_over50_pct_points": 1.5, "d_main_fps": -0.2, "d_cpu_cores": 0.3}
+    ]
+
+
+def test_estimate_counts_every_seed_for_auto_conditions():
+    assert bench.estimate_seconds("GH", 20.0, 3.0, n_seeds=3) == 5.0 + 3 * (3 + 20 + 12) + 3 * (3 + 20 + 12 + 1)
+    assert bench.estimate_seconds("GH", 20.0, 3.0) == bench.estimate_seconds("GH", 20.0, 3.0, n_seeds=1)
+    assert bench.estimate_seconds("BC", 20.0, 3.0, n_seeds=3) == bench.estimate_seconds("BC", 20.0, 3.0)  # AUTO가 없으면 시드 수는 무관
