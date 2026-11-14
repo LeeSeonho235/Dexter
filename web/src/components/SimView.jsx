@@ -4,14 +4,36 @@
 // 각도 계산은 view/camera.js(순수 함수)에서 하고 여기서는 이벤트만 넘긴다.
 
 import { useEffect, useRef } from 'react'
+import { auxStatusText, auxToggleVisible } from '../aux/view.js'
 import { formatView } from '../view/camera.js'
 import { PRESET_LABELS } from '../view/config.js'
+import AuxMirrors from './AuxMirrors.jsx'
+import SideMirror from './SideMirror.jsx'
 import ViewCompass from './ViewCompass.jsx'
 
 const WHEEL_LINE_TO_PX = 33 // deltaMode가 "줄"인 마우스(주로 Firefox)를 픽셀 단위로 맞춘다
 
 // mode: 서버의 매핑 방식('relative' | 'absolute'). 아직 모르면 기본인 상대 모드로 본다.
-export default function SimView({ url, view, mode, onDrag, onWheel, onPreset }) {
+// control, scene: 서버 state.control / state.scene. 구석의 옆모습 2D 그림(보기 전용)이 그린다.
+// 보조 카메라(2-6): auxMode 'mirrors'면 진짜 화면 두 개(auxFrame), 'fallback'이면 2D 그림. auxState = 서버 state.aux,
+//   auxWanted/onAuxToggle = 체크박스(서버에서 aux가 켜져 있을 때만 보인다), connected = 서버 연결 여부.
+export default function SimView({
+  url,
+  view,
+  mode,
+  control,
+  scene,
+  auxMode = 'fallback',
+  auxFrame = null,
+  auxState,
+  auxWanted = true,
+  onAuxToggle = () => {},
+  connected = false,
+  onDrag,
+  onWheel,
+  onPreset,
+}) {
+  const auxText = auxStatusText({ connected, auxState, wanted: auxWanted, mode: auxMode })
   const relative = mode !== 'absolute'
   const frameRef = useRef(null)
   const lastPointerRef = useRef(null) // 끄는 중이면 마지막 포인터 위치 {x, y}
@@ -70,7 +92,25 @@ export default function SimView({ url, view, mode, onDrag, onWheel, onPreset }) 
           <div className="placeholder">시뮬레이션 화면 기다리는 중</div>
         )}
         <ViewCompass view={view} mode={mode} />
+        {auxMode === 'mirrors' ? (
+          <>
+            <AuxMirrors frame={auxFrame} />
+            {/* 창이 좁아 진짜 보조 화면이 숨겨지면 이 2D 그림이 대신 보인다(평소에는 display:none, index.css) */}
+            <SideMirror control={control} scene={scene} className="side-mirror-narrow-only" />
+          </>
+        ) : (
+          <SideMirror control={control} scene={scene} />
+        )}
       </div>
+
+      {auxToggleVisible({ connected, auxState }) && (
+        <div className="aux-toggle-row">
+          <label className="aux-toggle">
+            <input type="checkbox" checked={auxWanted} onChange={(event) => onAuxToggle(event.target.checked)} /> 보조 화면 (옆에서 · 비스듬히)
+          </label>
+          {auxText && <span className="aux-status">{auxText}</span>}
+        </div>
+      )}
 
       <div className="legend">
         <span className="legend-item">

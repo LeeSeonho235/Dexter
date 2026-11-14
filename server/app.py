@@ -4,9 +4,10 @@
     cd ~/handover && MUJOCO_GL=egl server/.venv/bin/python -m server.app
 
 - 127.0.0.1:PORT(server/config.py)에서만 연다. 브라우저는 Vite 프록시 '/ws'로 붙는다.
-- 브라우저 → 서버: hand(숫자만), ping, view(보기 방향), height(키보드 높이), record(녹화 명령), reset(블록 리셋).
-  바이너리(영상·이미지)는 받지 않는다.
-- 서버 → 브라우저: JPEG 프레임(바이너리), state(녹화 상태는 state.record), pong, error(JSON 텍스트).
+- 브라우저 → 서버: hand(숫자만), ping, view(보기 방향), height(키보드 높이), record(녹화 명령), reset(블록 리셋),
+  aux(보조 카메라 화면을 받을지, 2-6). 바이너리(영상·이미지)는 받지 않는다.
+- 서버 → 브라우저: JPEG 프레임(바이너리, 메인 화면), state(녹화 상태는 state.record, 보조 카메라 상태는 state.aux), pong, error,
+  aux_frame(보조 카메라 두 시점을 가로로 이은 JPEG을 base64로 담은 JSON 텍스트. 메인 프레임의 바이너리 형식을 그대로 두려고 텍스트로 보낸다).
 - 연결마다 받기 작업과 보내기 작업을 따로 돌려서, 프레임 전송이 느려도 메시지 받기가 막히지 않는다.
   WebSocket에 send하는 곳은 보내기 작업 하나뿐이다.
 - 받은 hand는 제어 스레드(server/control.py)에 "최신 한 개"로 넘기기만 한다. 매핑과 역기구학 계산은 거기서 하므로
@@ -19,6 +20,8 @@ import os
 os.environ.setdefault("MUJOCO_GL", "egl")
 
 import asyncio  # noqa: E402
+import base64  # noqa: E402
+import io  # noqa: E402
 import json  # noqa: E402
 import logging  # noqa: E402
 import time  # noqa: E402
@@ -30,8 +33,11 @@ from fastapi import FastAPI, WebSocket  # noqa: E402
 
 import numpy as np  # noqa: E402
 
-from server import auto_config, config  # noqa: E402
+from PIL import Image  # noqa: E402
+
+from server import auto_config, aux_view_config, config  # noqa: E402
 from server.auto import AutoRunner  # noqa: E402
+from server.aux_view import AuxViewWorker  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 from server.control import ControlWorker  # noqa: E402
@@ -58,6 +64,8 @@ class Connection:
     pending_pongs: list[int] = field(default_factory=list)
     pending_error: str | None = None
     frame: tuple[int, bytes] | None = None  # 아직 안 보낸 최신 프레임 (밀리면 이전 것은 버림)
+    aux_enabled: bool = False  # 이 연결이 보조 카메라 화면을 받겠다고 했는가(aux 메시지). 서버에서 aux가 꺼져 있으면 항상 False
+    aux_frame: tuple[int, str] | None = None  # 아직 안 보낸 최신 보조 프레임(aux_frame JSON 텍스트). 밀리면 이전 것은 버림
 
 
 class Hub:
@@ -70,12 +78,14 @@ class Hub:
         control: ControlWorker,
         recording: RecordingService | None = None,
         auto: AutoRunner | None = None,
+        aux: AuxViewWorker | None = None,
     ) -> None:
         self.worker = worker
         self.loop = loop
         self.control = control
         self.recording = recording
         self.auto = auto
+        self.aux = aux
         self.connections: set[Connection] = set()
 
     def add(self, conn: Connection) -> None:
@@ -86,7 +96,36 @@ class Hub:
     def remove(self, conn: Connection) -> None:
         self.connections.discard(conn)
         self.worker.set_viewer_count(len(self.connections))
+        self._update_aux_viewers()
         log.info("browser disconnected (%d open)", len(self.connections))
+
+    def set_aux_enabled(self, conn: Connection, enabled: bool) -> None:
+        """이 연결의 보조 카메라 화면 켜기/끄기. 서버에서 aux가 꺼져 있으면(AUX_ENABLED=False) 조용히 무시한다."""
+        if self.aux is None or not self.aux.enabled:
+            return
+        conn.aux_enabled = enabled
+        if not enabled:
+            conn.aux_frame = None
+        self._update_aux_viewers()
+
+    def _update_aux_viewers(self) -> None:
+        """보조 화면을 켠 연결 수를 aux에 알린다(0이면 aux는 렌더하지 않는다). 메인 화면의 보는 연결 수와는 따로다."""
+        if self.aux is not None:
+            self.aux.set_viewer_count(sum(1 for conn in self.connections if conn.aux_enabled))
+
+    def on_aux_frame_from_thread(self, seq: int, jpeg: bytes) -> None:
+        """보조 카메라 스레드에서 불린다. asyncio 루프로 넘기기만 한다."""
+        with suppress(RuntimeError):  # 종료 중 루프가 닫힌 경우
+            self.loop.call_soon_threadsafe(self._publish_aux_frame, seq, jpeg)
+
+    def _publish_aux_frame(self, seq: int, jpeg: bytes) -> None:
+        receivers = [conn for conn in self.connections if conn.aux_enabled]
+        if not receivers:
+            return
+        text = aux_frame_text(seq, jpeg)  # 한 번만 만들어 모든 연결이 같이 쓴다
+        for conn in receivers:
+            conn.aux_frame = (seq, text)
+            conn.wake.set()
 
     def on_frame_from_thread(self, seq: int, jpeg: bytes) -> None:
         """시뮬레이션 스레드에서 불린다. asyncio 루프로 넘기기만 한다."""
@@ -99,9 +138,25 @@ class Hub:
             conn.wake.set()
 
 
+def aux_frame_text(seq: int, jpeg: bytes) -> str:
+    """보조 카메라 프레임을 브라우저로 보내는 JSON 텍스트. jpeg는 두 시점을 가로로 이은 한 장이고 base64로 담는다(약 4/3배).
+    w, h는 이미지 전체 크기(px), views는 시점 수(왼쪽부터 AUX_CAMERAS 순서). 크기는 JPEG 헤더에서 읽는다(화소는 디코딩하지 않는다)."""
+    width_px, height_px = Image.open(io.BytesIO(jpeg)).size
+    return json.dumps(
+        {
+            "type": "aux_frame",
+            "seq": seq,
+            "w": width_px,
+            "h": height_px,
+            "views": len(aux_view_config.AUX_CAMERAS),
+            "jpeg": base64.b64encode(jpeg).decode("ascii"),
+        }
+    )
+
+
 def create_app(
     worker_factory=None, *, record_dir=None, record_max_s=None, record_store=None, policy_client=None, auto_max_s=None,
-    correction_dir=None, correction_store=None,
+    correction_dir=None, correction_store=None, aux_factory=None,
 ) -> FastAPI:
     """worker_factory(on_frame) -> SimWorker. 테스트에서 바꿔 끼울 수 있게 둔다.
     record_dir: 에피소드 저장 폴더(기본 config.RECORD_DIR). record_max_s: 최대 길이(기본 config.RECORD_MAX_S).
@@ -110,7 +165,8 @@ def create_app(
     auto_max_s: AUTO 최대 시간(기본 server/auto_config.py AUTO_MAX_S).
     correction_dir: 교정 에피소드와 auto_runs.csv를 저장할 폴더(기본 server/correction_config.py CORRECTION_DIR = data/corrections).
         record_dir만 주면(테스트) 그 옆의 corrections 폴더를 쓴다. 그래서 테스트가 실제 data/corrections를 건드리지 않는다.
-    correction_store: 저장소 자체를 바꿔 끼울 때(테스트에서 쓰기 실패를 흉내 낼 때)."""
+    correction_store: 저장소 자체를 바꿔 끼울 때(테스트에서 쓰기 실패를 흉내 낼 때).
+    aux_factory(on_frame) -> AuxViewWorker: 보조 카메라(2-6). 기본은 AuxViewWorker(on_frame=...)이고 AUX_ENABLED가 꺼져 있으면 아무것도 만들지 않는다."""
 
     def default_factory(on_frame):
         return SimWorker(
@@ -130,17 +186,30 @@ def create_app(
 
     factory = worker_factory or default_factory
 
+    def default_aux_factory(on_frame):
+        return AuxViewWorker(on_frame=on_frame)
+
+    make_aux = aux_factory or default_aux_factory
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         loop = asyncio.get_running_loop()
         hub_ref: list[Hub] = []
         worker = factory(lambda seq, jpeg: hub_ref[0].on_frame_from_thread(seq, jpeg))
         control = ControlWorker(worker)
-        hub = Hub(worker, loop, control)
+        aux = make_aux(lambda seq, jpeg: hub_ref[0].on_aux_frame_from_thread(seq, jpeg))
+        hub = Hub(worker, loop, control, aux=aux)
         hub_ref.append(hub)
         # Renderer 생성(수백 ms)과 IK 모델 읽기가 루프를 막지 않게 스레드에서 기다린다.
         await asyncio.to_thread(worker.start)
         await asyncio.to_thread(control.start)
+        # 보조 카메라(2-6): 꺼져 있으면(기본) 아무것도 만들지 않는다. 켜져 있는데 시작에 실패해도 서버는 계속 돈다(이유는 state.aux.error).
+        try:
+            await asyncio.to_thread(aux.start)
+        except Exception:
+            log.exception("aux view failed to start; the server continues without it (see state.aux.error)")
+        if aux.enabled and aux.is_alive and hasattr(worker, "attach_aux"):
+            worker.attach_aux(aux)
         # 녹화 서비스: 저장된 에피소드 목록을 읽는다(폴더가 없으면 빈 목록. 폴더는 첫 저장 때 만든다).
         store = record_store or EpisodeStore(record_dir)
         if correction_store is not None:
@@ -185,6 +254,7 @@ def create_app(
         try:
             yield
         finally:
+            await asyncio.to_thread(aux.stop)  # 꺼져 있으면 바로 돌아온다
             await asyncio.to_thread(auto.close)  # 실행 중이면 멈추고 정책 프로세스를 끈다
             await asyncio.to_thread(recording.close)
             await asyncio.to_thread(control.stop)
@@ -198,8 +268,8 @@ def create_app(
         await websocket.accept()
         conn = Connection()
         hub.add(conn)
-        receiver = asyncio.create_task(_receive_loop(websocket, conn, hub.control, hub.worker, hub.recording, hub.auto))
-        sender = asyncio.create_task(_send_loop(websocket, conn, hub.worker, hub.control, hub.recording, hub.auto))
+        receiver = asyncio.create_task(_receive_loop(websocket, conn, hub.control, hub.worker, hub.recording, hub.auto, hub=hub))
+        sender = asyncio.create_task(_send_loop(websocket, conn, hub.worker, hub.control, hub.recording, hub.auto, hub.aux))
         try:
             done, _ = await asyncio.wait({receiver, sender}, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
@@ -225,6 +295,7 @@ async def _receive_loop(
     worker: SimWorker,
     recording: RecordingService | None = None,
     auto: AutoRunner | None = None,
+    hub: Hub | None = None,
 ) -> None:
     while True:
         message = await websocket.receive()
@@ -259,6 +330,10 @@ async def _receive_loop(
             if refusal is not None:
                 conn.pending_error = refusal
                 conn.wake.set()
+        elif msg["type"] == "aux":
+            # 보조 카메라 화면을 이 연결이 받을지(2-6). 보기 전용이라 로봇, 녹화, AUTO에는 아무 영향이 없다. aux가 꺼져 있으면 무시한다.
+            if hub is not None:
+                hub.set_aux_enabled(conn, msg["enabled"])
         elif msg["type"] == "auto" and auto is not None:
             # AUTO 명령(4-1). 형식은 맞지만 지금은 할 수 없는 요청은 이유를 error로 돌려보낸다(invalid_count는 올리지 않는다).
             refusal = auto.handle(msg["action"])
@@ -274,6 +349,7 @@ async def _send_loop(
     control: ControlWorker,
     recording: RecordingService | None = None,
     auto: AutoRunner | None = None,
+    aux: AuxViewWorker | None = None,
 ) -> None:
     next_state_s = time.monotonic()
     while True:
@@ -292,9 +368,30 @@ async def _send_loop(
             _, jpeg = conn.frame
             conn.frame = None
             await websocket.send_bytes(jpeg)
+        if conn.aux_frame is not None:
+            _, aux_text = conn.aux_frame
+            conn.aux_frame = None
+            await websocket.send_text(aux_text)
         if time.monotonic() >= next_state_s:
-            await websocket.send_text(json.dumps(_state_message(conn, worker, control, recording, auto)))
+            await websocket.send_text(json.dumps(_state_message(conn, worker, control, recording, auto, aux)))
             next_state_s = time.monotonic() + config.STATE_SEND_INTERVAL_S
+
+
+def _scene_message(worker: SimWorker) -> dict[str, Any] | None:
+    """옆모습 보조 화면(2-6)이 그릴 장면 값: 블록 중심(m)과 블록·목표 크기(m). 읽기만 한다(시뮬레이션, 녹화, 학습 이미지에 아무 영향 없음).
+
+    집게 끝(tip_m)과 열림/닫힘은 state.control에 이미 있다. 시뮬레이션이 아직 첫 틱을 안 했으면 None.
+    상수는 server/config.py 값을 그대로 보낸다(웹에 같은 숫자를 따로 적지 않는다).
+    """
+    snapshot = worker.snapshot
+    if snapshot is None:
+        return None
+    return {
+        "block_m": [round(float(v), 4) for v in snapshot["block_m"]],  # x, y, z (m)
+        "block_half_m": config.BLOCK_HALF_M,
+        "target_center_m": list(config.TARGET_CENTER_M),  # x, y (m)
+        "target_half_m": config.TARGET_HALF_M,
+    }
 
 
 def _state_message(
@@ -303,6 +400,7 @@ def _state_message(
     control: ControlWorker,
     recording: RecordingService | None = None,
     auto: AutoRunner | None = None,
+    aux: AuxViewWorker | None = None,
 ) -> dict[str, Any]:
     message = {
         "type": "state",
@@ -314,11 +412,15 @@ def _state_message(
         "control": control.state(),
         # 지금 적용 중인 보기 방향(서버에 하나뿐, 마지막에 보낸 값)
         "view": worker.view.as_dict(),
+        # 옆모습 보조 화면용 장면 값(2-6): docs/14-aux-view.md
+        "scene": _scene_message(worker),
     }
     if recording is not None:
         message["record"] = recording.state()  # 녹화 상태(3-2): docs/08-recording.md
     if auto is not None:
         message["auto"] = auto.state()  # AUTO 상태(4-1): docs/12-auto.md
+    if aux is not None:
+        message["aux"] = aux.state()  # 보조 카메라 상태(2-6): enabled, running, viewers, fps, slowed, error 등. 웹이 2D 그림으로 돌아갈지 정하는 데 쓴다
     return message
 
 

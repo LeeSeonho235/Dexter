@@ -29,6 +29,7 @@ RECORD_ACTIONS = ("start", "stop_success", "stop_fail", "discard", "delete_last"
 RESET_FIELDS = frozenset({"type"})
 AUTO_ACTIONS = ("start", "stop", "shutdown_policy", "takeover", "handback", "save_correction", "discard_correction")
 AUTO_FIELDS = frozenset({"type", "action"})
+AUX_FIELDS = frozenset({"type", "enabled"})  # 보조 카메라 화면(2-6)을 이 연결이 받을지: {"type":"aux","enabled":true|false}
 
 
 class ProtocolError(ValueError):
@@ -64,6 +65,8 @@ def parse_client_message(raw: str | bytes, max_bytes: int) -> dict[str, Any]:
         return validate_reset(msg)
     if msg_type == "auto":
         return validate_auto(msg)
+    if msg_type == "aux":
+        return validate_aux(msg)
     raise ProtocolError(f"unknown type: {msg_type!r}")
 
 
@@ -159,6 +162,15 @@ def validate_auto(msg: dict[str, Any]) -> dict[str, Any]:
     action = msg["action"]
     if not isinstance(action, str) or action not in AUTO_ACTIONS:
         raise ProtocolError(f"action must be one of {list(AUTO_ACTIONS)}")
+    return msg
+
+
+def validate_aux(msg: dict[str, Any]) -> dict[str, Any]:
+    """보조 카메라 화면 켜기/끄기: {"type":"aux","enabled":true|false}. enabled는 bool만 받는다(0/1, 문자열은 거부).
+    이 메시지는 보기 전용 화면을 받을지만 정한다. 로봇, 녹화, AUTO에는 아무 영향이 없다."""
+    _check_fields(msg, AUX_FIELDS)
+    if not isinstance(msg["enabled"], bool):
+        raise ProtocolError("enabled must be true or false")
     return msg
 
 
