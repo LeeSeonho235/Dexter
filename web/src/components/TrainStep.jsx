@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { buildColabCell, CONDITIONS, nameError } from '../train/colabCell.js'
 import { COLAB_NOTEBOOK_URL, DRIVE_FOLDER_URL } from '../train/links.js'
+import { estimateText, STEPS_DEFAULT, STEPS_MAX, STEPS_MIN, stepsError } from '../train/trainTime.js'
 
 // 2단계 "학습": Colab 1번 셀에 붙여 넣을 설정 줄을 만든다. 서버와 주고받는 것은 없다(웹 안의 문자열 생성뿐).
 export default function TrainStep() {
@@ -8,6 +9,7 @@ export default function TrainStep() {
   // 조건마다 이름을 따로 기억한다(다른 조건으로 갔다 와도 입력이 남는다). 손대지 않았으면 기본값을 쓴다.
   const [names, setNames] = useState({})
   const [tarNames, setTarNames] = useState({}) // 없으면 이름과 같게
+  const [stepsInput, setStepsInput] = useState(String(STEPS_DEFAULT)) // 안내용: 셀 코드에는 넣지 않는다
   const [copyState, setCopyState] = useState('idle') // idle | done | failed
 
   const condition = CONDITIONS.find((c) => c.id === conditionId)
@@ -16,6 +18,8 @@ export default function TrainStep() {
   const nameProblem = nameError(name)
   const tarProblem = nameError(tarName)
   const code = buildColabCell(name, tarName)
+  const stepsProblem = stepsError(stepsInput)
+  const estimate = estimateText(stepsInput)
 
   async function copy() {
     if (!code) return
@@ -81,6 +85,22 @@ export default function TrainStep() {
           {tarProblem && <span className="field-error">{tarProblem}</span>}
         </label>
       </div>
+
+      <div className="field-row">
+        <label className="field">
+          <span>
+            학습 스텝 수 (STEPS, {STEPS_MIN.toLocaleString('en-US')}~{STEPS_MAX.toLocaleString('en-US')})
+          </span>
+          <input type="text" inputMode="numeric" value={stepsInput} spellCheck={false} onChange={(e) => setStepsInput(e.target.value)} />
+          {stepsProblem && <span className="field-error">{stepsProblem}</span>}
+        </label>
+        <div className="field">
+          <span>예상 학습 시간</span>
+          <strong className="estimate">{estimate ?? '—'}</strong>
+          {estimate && <span className="note">노트북 1번 셀의 STEPS 값을 {Number(stepsInput.trim()).toLocaleString('en-US')}으로 맞추세요(위 셀 코드에는 들어 있지 않습니다)</span>}
+        </div>
+      </div>
+      <p className="note">탭을 닫지 마세요. 무료 Colab은 중간에 끊길 수 있고, GPU가 T4가 아니면 시간이 달라집니다.</p>
 
       <div className="link-row">
         <a className="link-button" href={DRIVE_FOLDER_URL} target="_blank" rel="noopener noreferrer">

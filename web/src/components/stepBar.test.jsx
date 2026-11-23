@@ -46,6 +46,15 @@ describe('TrainStep', () => {
     expect(count(html, 'type="radio"')).toBe(3)
   })
 
+  it('STEPS 안내: 기본 20000 → 약 47분, 경고문이 있고 셀 코드에는 STEPS가 없다', () => {
+    const html = renderToStaticMarkup(<TrainStep />)
+    expect(html).toContain('value="20000"')
+    expect(html).toContain('약 47분 (설치·확인 포함 약 +10분)')
+    expect(html).toContain('탭을 닫지 마세요')
+    const code = html.slice(html.indexOf('class="code-box"'), html.indexOf('</pre>'))
+    expect(code).not.toContain('STEPS')
+  })
+
   it('링크 2개가 새 탭으로 열리고 코드 상자보다 위에 있다', () => {
     const html = renderToStaticMarkup(<TrainStep />)
     for (const url of [DRIVE_FOLDER_URL, COLAB_NOTEBOOK_URL]) {

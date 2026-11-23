@@ -239,6 +239,10 @@ code {
   color: #c62828;
 }
 
+.estimate {
+  font-size: 18px;
+}
+
 .link-row {
   display: flex;
   flex-wrap: wrap;
