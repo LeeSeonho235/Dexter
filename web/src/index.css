@@ -603,6 +603,11 @@ code {
   max-width: 100%;
 }
 
+/* 영상 아래 묶음(보기 방향 · 보조 화면 · 범례): 영상과 8px 띄운다 */
+.sim-controls {
+  margin-top: 8px;
+}
+
 .preset-row {
   display: flex;
   flex-wrap: wrap;

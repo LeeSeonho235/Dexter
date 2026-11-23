@@ -68,15 +68,6 @@ export default function SimView({
 
   return (
     <div className="sim-column">
-      <div className="preset-row">
-        <span className="preset-title">보기 방향:</span>
-        {PRESET_LABELS.map(([name, label]) => (
-          <button key={name} type="button" onClick={() => onPreset(name)}>
-            {label}
-          </button>
-        ))}
-      </div>
-
       <div
         ref={frameRef}
         className="sim-view sim-view-interactive"
@@ -103,6 +94,17 @@ export default function SimView({
         )}
       </div>
 
+      {/* 영상 아래 한 묶음: 보기 방향 버튼 → 보조 화면 체크박스 → 범례. 영상이 열 맨 위에서 시작해 카메라 영상과 높이가 같다. */}
+      <div className="sim-controls">
+      <div className="preset-row">
+        <span className="preset-title">보기 방향:</span>
+        {PRESET_LABELS.map(([name, label]) => (
+          <button key={name} type="button" onClick={() => onPreset(name)}>
+            {label}
+          </button>
+        ))}
+      </div>
+
       {auxToggleVisible({ connected, auxState }) && (
         <div className="aux-toggle-row">
           <label className="aux-toggle">
@@ -120,6 +122,7 @@ export default function SimView({
           <span className="legend-swatch legend-target" /> 초록 = 목표
         </span>
         <span className="view-readout">{formatView(view)}</span>
+      </div>
       </div>
       <p className="note">화면 위에서 마우스로 끌면 돌고, 휠로 확대/축소합니다.</p>
       <p className="hand-direction-note">
