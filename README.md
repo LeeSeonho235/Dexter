@@ -6,10 +6,66 @@
 
 > 이름의 뜻: 라틴어 dexter는 "오른손"이며 dexterity(손재주)의 어원이다. 오른손으로 로봇을 가르친다.
 
+**질문: 로봇이 틀린 곳만 고쳐주면, 더 빨리 배울까?**
+
+같은 사람·같은 시간(약 2분 20초)·같은 학습 조건에서 비교한 1회 결과: **기준 62% / 교정 68% / 다시 녹화(추가 시연) 88%.** 이번에는 시범을 더 보여준 쪽이 가장 높았고, 교정은 기준과 차이가 확실하지 않았다. 1회 결과라 반복이 필요하다. 자세한 내용: [docs/15-experiment-r1.md](docs/15-experiment-r1.md)
+
+![성공률 비교: 기준 62%, 교정 68%, 추가 시연 88%](docs/img/r1_results.png)
+
 ### 지금 되는 것
 
 - **3단계 마법사 화면:** 1 녹화 → 2 학습(Colab) → 3 테스트·교정. 2단계 화면이 Colab 1번 셀에 붙여 넣을 코드(Colab 셀 생성기)와 예상 학습 시간을 만들어 준다 → [docs/10-colab.md](docs/10-colab.md)
-- **1회차 실험 결과(1회 결과):** 기준 62% / 교정 68% / 다시 녹화(추가 시연) 88%. 이번 1회에서는 시범을 더 보여준 쪽이 가장 높았고, 교정은 기준과 차이가 확실하지 않았다. 반복이 필요하다 → [docs/15-experiment-r1.md](docs/15-experiment-r1.md)
+
+## 설치와 실행
+
+### 필요한 환경
+
+- Python 3.12 (`server/.venv`는 3.12.3으로 만들어져 있다. 다른 버전은 확인 필요)
+- Node.js (개발 환경은 v22.23.2. 최소 버전은 확인 필요)
+- **확인된 환경: Python 3.12, Node 22, 맥(arm64).** 리눅스 서버(`MUJOCO_GL=egl` 또는 `osmesa`)에서도 개발했다. 그 밖의 환경은 확인하지 않았다.
+- 서버 패키지: `python3.12 -m venv server/.venv` 후 `server/.venv/bin/pip install -r server/requirements.txt`
+
+### AUTO용 `train/.venv` 만들기
+
+AUTO(로봇이 혼자 하기)는 서버와 따로 만든 `train/.venv`의 LeRobot으로 정책을 돌린다. 이 환경이 없으면 AUTO가 동작하지 않는다.
+
+```bash
+python3.12 -m venv train/.venv
+train/.venv/bin/pip install -r train/requirements.txt
+```
+
+`train/requirements.txt`에는 `lerobot[training]==0.6.1`, `torch==2.11.0+cpu`, `numpy==2.2.6`, `mujoco==3.16.0`(평가용, `server/.venv`와 같은 버전)이 들어 있어서 mujoco를 따로 설치할 필요는 없다. 맥에서 확인된 버전은 lerobot 0.6.1, torch 2.11.0, numpy 2.2.6, mujoco 3.16.0이다. 평가를 돌릴 때는 `MUJOCO_GL=cgl`을 쓴다(맥 기준).
+
+확인 필요: `train/requirements.txt`는 CPU용 torch 빌드(`2.11.0+cpu`, PyTorch CPU 저장소 지정)로 적혀 있다. 맥에서 이 파일 그대로 설치되는지는 확인하지 못했다. 설치가 안 되면 `+cpu`가 없는 `torch==2.11.0`으로 바꿔 시도하되, 그 방법은 검증되지 않았다.
+
+### 저장소에 없는 파일 3개
+
+저장소에 들어 있지 않다(`.gitignore`로 제외). 받는 방법은 **제공자에게 받기**.
+
+| 파일 | 놓을 위치 | 용도 |
+|---|---|---|
+| 로봇 모델 | `third_party/mujoco_menagerie/robotstudio_so101` | SO-101 로봇 |
+| 손 인식 모델 | `web/public/models/hand_landmarker.task` | 웹캠 손 인식 |
+| 학습된 정책 | `checkpoints/<이름>/pretrained_model` | AUTO(로봇이 혼자 하기) |
+
+현재 코드는 AUTO 정책 경로를 `checkpoints/dexter_act_v1/pretrained_model`로 정해 둔 상태다(`server/auto_config.py`). 그래서 `<이름>`은 `dexter_act_v1`로 놓는다. 다른 이름을 쓰는 방법은 확인 필요. AUTO는 `train/.venv`(`train/requirements.txt`)의 LeRobot을 쓰는데, 그 환경을 만드는 절차는 이 README에 아직 없다(확인 필요).
+
+### 실행 (터미널 2개)
+
+```bash
+# 터미널 1: 서버 (맥 기준)
+AUX_ENABLED=1 MUJOCO_GL=cgl server/.venv/bin/python -m server.app
+
+# 터미널 2: 웹
+cd web && npm install && npm run dev -- --host 127.0.0.1 --port 3007 --strictPort
+```
+
+브라우저에서 `http://localhost:3007`을 연다. (`AUX_ENABLED=1`은 보조 카메라 화면을 켜는 값이며, 없으면 꺼진다. 리눅스 서버에서는 `MUJOCO_GL=egl` 또는 `osmesa`를 쓴다.)
+
+### 주의
+
+- 녹화는 **서버가 도는 컴퓨터의 `data/raw`**에 저장된다. (손 좌표 숫자와 시뮬레이션 화면만 저장하며 웹캠 영상은 저장하지 않는다.)
+- 학습은 **Google Colab**에서 한다. 웹 2단계 화면이 Colab 1번 셀 코드를 만들어 준다 → [docs/10-colab.md](docs/10-colab.md)
 
 ---
 
