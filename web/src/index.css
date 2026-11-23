@@ -574,7 +574,20 @@ code {
 }
 
 .panel-row .record-panel,
-.panel-row .control-hand {
+.panel-row .robot-panel {
+  max-width: none;
+}
+
+/* 카메라 영상과 손 인식 상태 패널을 한 열로(영상 폭 640px에 맞춘다) */
+.hand-column {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 640px;
+  max-width: 100%;
+}
+
+.hand-column .control-hand {
   max-width: none;
 }
 

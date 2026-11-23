@@ -164,11 +164,22 @@ export default function App() {
       <div hidden={step === 'train'}>
       <button className="primary" onClick={toggleCamera}>{cameraOn ? '카메라 끄기' : '카메라 켜기'}</button>
       <div className="layout">
-        {cameraOn ? (
-          <HandView onHand={onHand} onStatus={onStatus} edge={edge} reference={referenceHand} mode={mappingMode} />
-        ) : (
-          <div className="hand-view placeholder">카메라 꺼짐</div>
-        )}
+        {/* 카메라 영상 바로 아래에 손 인식 상태 패널을 붙여 같은 열에 둔다 */}
+        <div className="hand-column">
+          {cameraOn ? (
+            <HandView onHand={onHand} onStatus={onStatus} edge={edge} reference={referenceHand} mode={mappingMode} />
+          ) : (
+            <div className="hand-view placeholder">카메라 꺼짐</div>
+          )}
+          <ControlHandPanel
+            selection={selection}
+            cameraOn={cameraOn}
+            control={serverState?.control}
+            connected={connected}
+            edge={edge}
+            mode={mappingMode}
+          />
+        </div>
         <SimView
           url={frameUrl}
           view={view}
@@ -186,30 +197,20 @@ export default function App() {
           onPreset={onViewPreset}
         />
       </div>
-      {/* 1단계: 시연 녹화와 조종 손 안내를 한 줄에 나란히(1100px 미만이면 세로). 3단계에서는 조종 손 안내만 보인다. */}
-      <div className={step === 'record' ? 'panel-row' : 'layout'}>
+      {/* 1단계는 시연 녹화, 3단계는 AUTO가 로봇 상태 패널과 한 줄에 나란히(1100px 미만이면 세로). 안 보이는 쪽은 hidden으로만 숨긴다. */}
+      <div className="panel-row">
         <div hidden={step !== 'record'}>
           <RecordPanel record={serverState?.record} connected={connected} onCommand={onRecordCommand} />
         </div>
-        <ControlHandPanel
-          selection={selection}
-          cameraOn={cameraOn}
-          control={serverState?.control}
-          connected={connected}
-          edge={edge}
-          mode={mappingMode}
-        />
-      </div>
-      <div className="layout" hidden={step !== 'test'}>
-        <AutoPanel
-          auto={serverState?.auto}
-          record={serverState?.record}
-          control={serverState?.control}
-          connected={connected}
-          onCommand={onAutoCommand}
-        />
-      </div>
-      <div className="layout">
+        <div hidden={step !== 'test'}>
+          <AutoPanel
+            auto={serverState?.auto}
+            record={serverState?.record}
+            control={serverState?.control}
+            connected={connected}
+            onCommand={onAutoCommand}
+          />
+        </div>
         <RobotPanel control={serverState?.control} connected={connected} keys={heightKeys} />
       </div>
       </div>
