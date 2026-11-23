@@ -15,6 +15,7 @@
 ### 지금 되는 것
 
 - **3단계 마법사 화면:** 1 녹화 → 2 학습(Colab) → 3 테스트·교정. 2단계 화면이 Colab 1번 셀에 붙여 넣을 코드(Colab 셀 생성기)와 예상 학습 시간을 만들어 준다 → [docs/10-colab.md](docs/10-colab.md)
+- **학습은 Google Colab(T4)에서 한다.**
 
 ## 설치와 실행
 
@@ -66,6 +67,18 @@ cd web && npm install && npm run dev -- --host 127.0.0.1 --port 3007 --strictPor
 
 - 녹화는 **서버가 도는 컴퓨터의 `data/raw`**에 저장된다. (손 좌표 숫자와 시뮬레이션 화면만 저장하며 웹캠 영상은 저장하지 않는다.)
 - 학습은 **Google Colab**에서 한다. 웹 2단계 화면이 Colab 1번 셀 코드를 만들어 준다 → [docs/10-colab.md](docs/10-colab.md)
+
+## 학습 (Google Colab)
+
+학습은 내 컴퓨터가 아니라 Google Colab(T4 GPU)에서 LeRobot ACT로 한다.
+
+1. 웹 2단계(학습) 화면에서 조건(처음 시범 / 교정 / 추가 시연)을 고르고 셀 코드를 복사한다.
+2. 녹화 데이터를 학습용 데이터셋으로 변환해 tar로 묶고(방법: [docs/09-dataset.md](docs/09-dataset.md)), Google Drive의 `dexter` 폴더에 올린다.
+3. Colab 노트북(`train/colab/dexter_train.ipynb`) 1번 셀에 `DATASET_TAR`, `REPO_ID`, `DATASET_ROOT` 3줄을 붙여 넣고, 셀을 **위에서부터 하나씩** 실행한다(모두 실행은 하지 않는다). 웹 화면이 만드는 코드에는 `DRIVE_DIR` 줄도 있지만 노트북 값과 같다.
+4. 시간: 20,000스텝 약 47분 + 설치·확인 약 10분(T4 기준 추정치).
+5. 끝나면 8번 셀로 체크포인트를 받아 `checkpoints/<이름>/pretrained_model`에 풀어 AUTO에 쓴다(현재 코드는 폴더 이름 `dexter_act_v1`로 고정).
+
+자세한 단계: [docs/10-colab.md](docs/10-colab.md)
 
 ---
 
