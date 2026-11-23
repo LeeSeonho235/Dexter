@@ -25,6 +25,24 @@ const LABELS = {
   shutdown_policy: '정책 프로세스 지금 끄기',
 }
 
+// 항상 보이는 표 줄(auto/view.js summaryRows, auto/correction.js correctionRows의 줄 이름). 나머지 줄은 "자세히" 안으로 간다.
+const ALWAYS_ROWS = new Set(['시드', '경과 시간 (시뮬레이션)', '이번 세션 성공 / 시도', '저장한 교정', '시드 안내'])
+
+function SummaryTable({ rows }) {
+  return (
+    <table>
+      <tbody>
+        {rows.map(([name, value]) => (
+          <tr key={name}>
+            <th>{name}</th>
+            <td>{value}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
 export default function AutoPanel({ auto, record, control, connected, onCommand }) {
   const a = connected ? (auto ?? null) : null
   const states = buttonStates(a, record, connected)
@@ -58,6 +76,7 @@ export default function AutoPanel({ auto, record, control, connected, onCommand 
   }
 
   const event = a?.last_event
+  const allRows = [...summaryRows(a), ...correctionRows(a)]
   return (
     <div className={`panel record-panel auto-panel owner-${kind}`}>
       <h2 className="record-title">AUTO (학습된 정책)</h2>
@@ -118,32 +137,22 @@ export default function AutoPanel({ auto, record, control, connected, onCommand 
       {warning && <p className="record-flag warn">{warning}</p>}
       {event && <p className={`record-event ${eventLevel(event)}`}>{event.text}</p>}
 
-      <table>
-        <tbody>
-          {summaryRows(a).map(([name, value]) => (
-            <tr key={name}>
-              <th>{name}</th>
-              <td>{value}</td>
-            </tr>
-          ))}
-          {correctionRows(a).map(([name, value]) => (
-            <tr key={name}>
-              <th>{name}</th>
-              <td>{value}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      {/* 위의 상태 문구·배너·이벤트(오류 포함)는 접지 않는다. 표는 항상 보이는 줄과 "자세히" 줄로 나눈다. */}
+      <SummaryTable rows={allRows.filter(([name]) => ALWAYS_ROWS.has(name))} />
 
-      <div className="auto-policy">
-        <span className="note">{policyText(a, connected)}</span>
-        {button('shutdown_policy', 'auto-shutdown')}
-      </div>
-      <p className="note">
-        순서: 시연 녹화 상자에서 블록 리셋 → AUTO 시작(첫 시작은 정책을 불러오느라 몇 초 걸립니다) → 로봇이 틀리려 하면 Space로 넘겨받기 → 손을 화면 중앙에
-        보이기 → 고치기 → Space로 돌려주기 → 끝나면 교정 저장/버리기. AUTO 중에는 손과 키보드 입력이 무시되고, 녹화와 블록 리셋은 쓸 수 없습니다. 쓰지 않으면
-        정책 프로세스는 스스로 꺼집니다(공용 서버라서 바로 끄려면 위 버튼).
-      </p>
+      <details className="more">
+        <summary>자세히</summary>
+        <SummaryTable rows={allRows.filter(([name]) => !ALWAYS_ROWS.has(name))} />
+        <div className="auto-policy">
+          <span className="note">{policyText(a, connected)}</span>
+          {button('shutdown_policy', 'auto-shutdown')}
+        </div>
+        <p className="note">
+          순서: 시연 녹화 상자에서 블록 리셋 → AUTO 시작(첫 시작은 정책을 불러오느라 몇 초 걸립니다) → 로봇이 틀리려 하면 Space로 넘겨받기 → 손을 화면 중앙에
+          보이기 → 고치기 → Space로 돌려주기 → 끝나면 교정 저장/버리기. AUTO 중에는 손과 키보드 입력이 무시되고, 녹화와 블록 리셋은 쓸 수 없습니다. 쓰지 않으면
+          정책 프로세스는 스스로 꺼집니다(공용 서버라서 바로 끄려면 위 버튼).
+        </p>
+      </details>
     </div>
   )
 }
