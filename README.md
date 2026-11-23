@@ -6,6 +6,11 @@
 
 > 이름의 뜻: 라틴어 dexter는 "오른손"이며 dexterity(손재주)의 어원이다. 오른손으로 로봇을 가르친다.
 
+### 지금 되는 것
+
+- **3단계 마법사 화면:** 1 녹화 → 2 학습(Colab) → 3 테스트·교정. 2단계 화면이 Colab 1번 셀에 붙여 넣을 코드(Colab 셀 생성기)와 예상 학습 시간을 만들어 준다 → [docs/10-colab.md](docs/10-colab.md)
+- **1회차 실험 결과(1회 결과):** 기준 62% / 교정 68% / 다시 녹화(추가 시연) 88%. 이번 1회에서는 시범을 더 보여준 쪽이 가장 높았고, 교정은 기준과 차이가 확실하지 않았다. 반복이 필요하다 → [docs/15-experiment-r1.md](docs/15-experiment-r1.md)
+
 ---
 
 ## 왜 만들었나
@@ -61,6 +66,8 @@
 | [docs/04-architecture.md](docs/04-architecture.md) | 구조, 데이터 형식, 교정 모드 |
 | [docs/05-server-setup.md](docs/05-server-setup.md) | dev-server-01 설정 |
 | [docs/06-experiment.md](docs/06-experiment.md) | 실험 설계와 측정 |
+| [docs/10-colab.md](docs/10-colab.md) | Colab 학습 절차, 웹 2단계 셀 생성기 |
+| [docs/15-experiment-r1.md](docs/15-experiment-r1.md) | 1회차 실험 결과(교정 vs 추가 시연) |
 | [prompts/](prompts/) | 웹 Claude, Claude Code에 붙여 넣을 요청문 |
 
 ## 기술 스택

@@ -77,6 +77,25 @@
     **여러 스텝의 체크포인트를 한 번에 비교**하려면(Drive의 `dexter/checkpoints/step_010000/pretrained_model` 등을 같은 방법으로 `checkpoints/` 아래에 옮긴 뒤)
     `--checkpoints a,b,c`로 부른다(예시와 결과 구조는 `experiments/README.md`). 50개 시드에 체크포인트당 약 2분이다.
 
+## 웹 2단계 화면으로 1번 셀 만들기 (조건 3종)
+
+조건마다 데이터셋 이름이 다르다. 웹 마법사 2단계(학습)가 이름에 맞는 1번 셀 코드를 만들어 준다.
+
+| 조건 | 기본 이름 |
+|---|---|
+| 처음 시범 | `dexter_pick_place_v1` |
+| 교정 | `dexter_r1_correction` |
+| 추가 시연 | `dexter_r1_demo` |
+
+순서:
+1. 웹 2단계 화면에서 조건을 고르고 이름을 확인한다(영문·숫자·`_`·`-`만, 64자 이하).
+2. 만들어진 코드(`DRIVE_DIR`, `DATASET_TAR`, `REPO_ID`, `DATASET_ROOT` 4줄)를 복사한다.
+3. Colab 노트북 1번 셀에서 같은 4줄을 지우고 붙여 넣은 뒤 실행한다. 나머지 설정(`STEPS` 등)은 그대로 둔다.
+4. 웹 화면의 STEPS 입력은 예상 시간을 보여 주는 용도이고, 만들어진 셀 코드에는 들어 있지 않다. 기본값(20,000)이 아니면 노트북 1번 셀의 `STEPS`를 같은 값으로 직접 고친다.
+5. Drive의 `dexter/` 폴더에 `{이름}.tar`가 있어야 한다.
+
+예상 시간: 스텝당 약 0.14초(T4) → 20,000스텝 약 47분, 설치·확인에 약 10분 더 든다(합계 약 1시간). 0.14초는 웹 화면 코드가 쓰는 T4 기준 추정치이고(STEPS 입력 범위 1,000~100,000), 실제 값은 6번 셀의 [요약] 줄이 기준이다.
+
 ## 학습 설정 (노트북 1번 셀 기본값)
 
 | 변수 | 값 | 근거 |
@@ -142,7 +161,7 @@ Colab(GPU)에서 학습한 체크포인트는 `policy_preprocessor.json`에 `dev
 | **PNG 이미지 모드** (가장 안전) | `train/.venv/bin/python -I train/build_dataset.py --image-mode --out data/lerobot/dexter_pick_place_png` | **505.9 MB** (실측, 영상 파일 없이 parquet 안에 이미지) | 영상 디코더가 필요 없고 무손실(오차 0). 올리고 받는 데 시간이 더 걸린다 |
 | H.264 4:4:4 | `... build_dataset.py --codec h264 --out data/lerobot/dexter_pick_place_h264` | 약 79 MB(추정: 에피소드 21 실측 비율로 계산) | 널리 디코딩된다. 블록 색 오차 평균 4.4(AV1 4:4:4는 2.1). 이 서버에서 pyav로 만들고 읽는 것은 테스트로 확인했다 |
 
-새 폴더에 만든 뒤(`--out`은 아직 없는 폴더여야 한다) 같은 방법으로 tar를 만들어 올리고, 노트북 1번 셀의 `DATASET_TAR`와 `DATASET_ROOT`를 새 이름으로 바꾼다(`REPO_ID`는 `local/dexter_pick_place_v1` 그대로 쓴다. `meta/info.json`에는 이름이 아니라 구조가 들어 있다).
+새 폴더에 만든 뒤(`--out`은 아직 없는 폴더여야 한다) 같은 방법으로 tar를 만들어 올리고, 노트북 1번 셀의 `DATASET_TAR`, `REPO_ID`, `DATASET_ROOT` 3줄을 조건 이름에 맞춰 바꾼다(`REPO_ID = 'local/{이름}'`, 웹 2단계 셀 생성기가 만드는 방식과 같다. 교정·추가 시연 학습에서 이 방식으로 검증했다. `meta/info.json`에는 이름이 아니라 구조가 들어 있다).
 이미지 모드는 에피소드 20개 전체를 만들어 `verify_dataset.py`로 검증했다(상태/행동 정확 일치, 이미지 오차 0). 이 서버에서 만들 때 127초 걸렸다.
 
 ## 자주 막히는 곳
