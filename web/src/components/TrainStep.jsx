@@ -35,7 +35,7 @@ export default function TrainStep() {
       </p>
 
       <fieldset className="condition-group">
-        <legend>어떤 데이터로 학습하나요?</legend>
+        <legend>어떤 데이터로 학습시키실 건가요?</legend>
         {CONDITIONS.map((c) => (
           <label key={c.id} className="condition-option">
             <input

@@ -560,6 +560,26 @@ code {
   min-height: 1.3em;
 }
 
+/* 1단계: 시연 녹화 + 조종 손 안내를 가로 두 칸으로. 1100px 미만이면 한 칸(세로). */
+.panel-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+  margin-bottom: 16px;
+}
+
+.panel-row .record-panel,
+.panel-row .control-hand {
+  max-width: none;
+}
+
+@media (max-width: 1099px) {
+  .panel-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 /* 시뮬레이션 화면 + 보기 방향 조작 */
 .sim-column {
   width: 640px;

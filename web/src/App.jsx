@@ -186,8 +186,19 @@ export default function App() {
           onPreset={onViewPreset}
         />
       </div>
-      <div className="layout" hidden={step !== 'record'}>
-        <RecordPanel record={serverState?.record} connected={connected} onCommand={onRecordCommand} />
+      {/* 1단계: 시연 녹화와 조종 손 안내를 한 줄에 나란히(1100px 미만이면 세로). 3단계에서는 조종 손 안내만 보인다. */}
+      <div className={step === 'record' ? 'panel-row' : 'layout'}>
+        <div hidden={step !== 'record'}>
+          <RecordPanel record={serverState?.record} connected={connected} onCommand={onRecordCommand} />
+        </div>
+        <ControlHandPanel
+          selection={selection}
+          cameraOn={cameraOn}
+          control={serverState?.control}
+          connected={connected}
+          edge={edge}
+          mode={mappingMode}
+        />
       </div>
       <div className="layout" hidden={step !== 'test'}>
         <AutoPanel
@@ -199,14 +210,6 @@ export default function App() {
         />
       </div>
       <div className="layout">
-        <ControlHandPanel
-          selection={selection}
-          cameraOn={cameraOn}
-          control={serverState?.control}
-          connected={connected}
-          edge={edge}
-          mode={mappingMode}
-        />
         <RobotPanel control={serverState?.control} connected={connected} keys={heightKeys} />
       </div>
       </div>
