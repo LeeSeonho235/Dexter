@@ -13,6 +13,7 @@ export default defineConfig({
     host: '127.0.0.1',
     port: 3007,
     strictPort: true,
+    allowedHosts: ['.trycloudflare.com'], // Cloudflare 임시 터널 주소(*.trycloudflare.com)의 Host 헤더를 허용
     proxy: {
       // 브라우저 ws://localhost:3007/ws → 파이썬 서버. 같은 주소라 index.html의 CSP(connect-src 'self')를 바꾸지 않는다.
       '/ws': {
