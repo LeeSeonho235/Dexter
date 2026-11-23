@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { buildColabCell, CONDITIONS, nameError } from '../train/colabCell.js'
+import { COLAB_NOTEBOOK_URL, DRIVE_FOLDER_URL } from '../train/links.js'
 
 // 2단계 "학습": Colab 1번 셀에 붙여 넣을 설정 줄을 만든다. 서버와 주고받는 것은 없다(웹 안의 문자열 생성뿐).
 export default function TrainStep() {
@@ -80,6 +81,16 @@ export default function TrainStep() {
           {tarProblem && <span className="field-error">{tarProblem}</span>}
         </label>
       </div>
+
+      <div className="link-row">
+        <a className="link-button" href={DRIVE_FOLDER_URL} target="_blank" rel="noopener noreferrer">
+          ① Drive 폴더 열기 (tar 올리기)
+        </a>
+        <a className="link-button" href={COLAB_NOTEBOOK_URL} target="_blank" rel="noopener noreferrer">
+          ② Colab 노트북 열기
+        </a>
+      </div>
+      <p className="note">③ 아래 셀 코드를 복사해 노트북 1번 셀에 붙여넣고, 셀을 위에서부터 하나씩 실행(모두 실행 금지)</p>
 
       <pre className="code-box" aria-label="Colab 1번 셀 코드">
         {code ?? '# 이름을 먼저 바로잡으세요'}

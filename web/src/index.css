@@ -239,6 +239,34 @@ code {
   color: #c62828;
 }
 
+.link-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.link-button {
+  display: inline-block;
+  padding: 6px 14px;
+  font-size: 16px;
+  color: var(--accent);
+  text-decoration: none;
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+}
+
+.link-button:hover {
+  color: #fff;
+  background: var(--accent);
+}
+
+.link-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .code-box {
   margin: 0 0 8px;
   padding: 12px;

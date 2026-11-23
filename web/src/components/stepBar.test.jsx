@@ -1,6 +1,7 @@
 // StepBar와 TrainStep을 서버 렌더(react-dom/server)로 그려 구조를 확인한다(브라우저 없이 문자열로만).
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
+import { COLAB_NOTEBOOK_URL, DRIVE_FOLDER_URL } from '../train/links.js'
 import StepBar from './StepBar.jsx'
 import TrainStep from './TrainStep.jsx'
 
@@ -43,5 +44,16 @@ describe('TrainStep', () => {
     expect(html).toContain('DATASET_ROOT')
     expect(html).toContain('코드 복사')
     expect(count(html, 'type="radio"')).toBe(3)
+  })
+
+  it('링크 2개가 새 탭으로 열리고 코드 상자보다 위에 있다', () => {
+    const html = renderToStaticMarkup(<TrainStep />)
+    for (const url of [DRIVE_FOLDER_URL, COLAB_NOTEBOOK_URL]) {
+      expect(html).toContain(`href="${url}" target="_blank" rel="noopener noreferrer"`)
+      expect(html.indexOf(url)).toBeLessThan(html.indexOf('class="code-box"'))
+    }
+    expect(html).toContain('① Drive 폴더 열기 (tar 올리기)')
+    expect(html).toContain('② Colab 노트북 열기')
+    expect(html).toContain('모두 실행 금지')
   })
 })
