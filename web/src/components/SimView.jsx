@@ -103,6 +103,18 @@ export default function SimView({
             {label}
           </button>
         ))}
+        {/* 범례 + 보기 값: 버튼 줄 오른쪽 빈 자리. 좁아서 줄이 바뀌면 아래 줄 오른쪽에 둔다. */}
+        <div className="preset-side">
+          <div className="legend">
+            <span className="legend-item">
+              <span className="legend-swatch legend-block" /> 빨강 = 블록
+            </span>
+            <span className="legend-item">
+              <span className="legend-swatch legend-target" /> 초록 = 목표
+            </span>
+          </div>
+          <span className="view-readout">{formatView(view)}</span>
+        </div>
       </div>
 
       {auxToggleVisible({ connected, auxState }) && (
@@ -113,16 +125,6 @@ export default function SimView({
           {auxText && <span className="aux-status">{auxText}</span>}
         </div>
       )}
-
-      <div className="legend">
-        <span className="legend-item">
-          <span className="legend-swatch legend-block" /> 빨강 = 블록
-        </span>
-        <span className="legend-item">
-          <span className="legend-swatch legend-target" /> 초록 = 목표
-        </span>
-        <span className="view-readout">{formatView(view)}</span>
-      </div>
       </div>
       <p className="note">화면 위에서 마우스로 끌면 돌고, 휠로 확대/축소합니다.</p>
       <p className="hand-direction-note">
