@@ -7,6 +7,24 @@ import { useEffect, useRef, useState } from 'react'
 import { createConfirm } from '../record/confirm.js'
 import { buttonStates, commandFor, eventLevel, statusText, stillIsHigh, summaryRows } from '../record/view.js'
 
+// 항상 보이는 요약 줄(record/view.js summaryRows의 줄 이름). 나머지 줄은 "자세히" 안으로 간다.
+const ALWAYS_ROWS = new Set(['지금 시드 / 다음 시드', '저장된 에피소드 (성공 / 실패)', '경과 시간'])
+
+function SummaryTable({ rows }) {
+  return (
+    <table>
+      <tbody>
+        {rows.map(([name, value]) => (
+          <tr key={name}>
+            <th>{name}</th>
+            <td>{value}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
 export default function RecordPanel({ record, connected, onCommand }) {
   const rec = connected ? (record ?? null) : null
   const states = buttonStates(rec, connected)
@@ -55,6 +73,7 @@ export default function RecordPanel({ record, connected, onCommand }) {
   const event = rec?.last_event
   const high = rec?.recording && stillIsHigh(rec.still_ratio, rec.still_longest_s)
   const lastIndex = rec?.last_episode?.index
+  const allRows = summaryRows(rec)
 
   return (
     <div className="panel record-panel">
@@ -85,20 +104,15 @@ export default function RecordPanel({ record, connected, onCommand }) {
         <p className="record-event error">저장 실패가 {rec.save_error_count}번 있었습니다. 실패한 에피소드는 성공/실패 수에 들어 있지 않습니다.</p>
       )}
 
-      <table>
-        <tbody>
-          {summaryRows(rec).map(([name, value]) => (
-            <tr key={name}>
-              <th>{name}</th>
-              <td>{value}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <p className="note">
-        순서: 블록 리셋 → 녹화 시작 → (블록을 집어 목표에 놓기) → 끝: 성공 또는 끝: 실패. 틀렸거나 망설였으면 "취소"로 버립니다. 높이 키(↑↓, W/S)는 버튼에
-        포커스가 있어도 동작합니다.
-      </p>
+      <SummaryTable rows={allRows.filter(([name]) => ALWAYS_ROWS.has(name))} />
+      <details className="more">
+        <summary>자세히</summary>
+        <SummaryTable rows={allRows.filter(([name]) => !ALWAYS_ROWS.has(name))} />
+        <p className="note">
+          순서: 블록 리셋 → 녹화 시작 → (블록을 집어 목표에 놓기) → 끝: 성공 또는 끝: 실패. 틀렸거나 망설였으면 "취소"로 버립니다. 높이 키(↑↓, W/S)는 버튼에
+          포커스가 있어도 동작합니다.
+        </p>
+      </details>
     </div>
   )
 }

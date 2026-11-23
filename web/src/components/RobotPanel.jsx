@@ -77,21 +77,24 @@ export default function RobotPanel({ control, connected, keys = IDLE_KEYS }) {
         </div>
       </div>
 
-      <table>
-        <tbody>
-          {rows.map(([name, value]) => (
-            <tr key={name}>
-              <th>{name}</th>
-              <td>{value}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      {c?.ik_last_failure && <p className="status">IK 마지막 실패 이유: {c.ik_last_failure}</p>}
-      <p className="note">
-        손 메시지→ctrl은 서버가 메시지를 받은 때부터 ctrl에 반영할 때까지의 시간입니다. 브라우저에서 서버까지는 왕복 지연이
-        따로 보여주고, ctrl이 반영된 뒤 실제로 움직이기까지(물리 틱 최대 33ms, 모터 응답)는 들어 있지 않습니다.
-      </p>
+      <details className="more">
+        <summary>자세히</summary>
+        <table>
+          <tbody>
+            {rows.map(([name, value]) => (
+              <tr key={name}>
+                <th>{name}</th>
+                <td>{value}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {c?.ik_last_failure && <p className="status">IK 마지막 실패 이유: {c.ik_last_failure}</p>}
+        <p className="note">
+          손 메시지→ctrl은 서버가 메시지를 받은 때부터 ctrl에 반영할 때까지의 시간입니다. 브라우저에서 서버까지는 왕복 지연이
+          따로 보여주고, ctrl이 반영된 뒤 실제로 움직이기까지(물리 틱 최대 33ms, 모터 응답)는 들어 있지 않습니다.
+        </p>
+      </details>
     </div>
   )
 }

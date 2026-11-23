@@ -603,6 +603,17 @@ code {
   max-width: 100%;
 }
 
+/* 접이식 "자세히": 패널 안에서 기본 닫힘 */
+.more {
+  margin-top: 8px;
+}
+
+.more > summary {
+  font-size: 14px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
 /* 영상 아래 묶음(보기 방향 · 보조 화면 · 범례): 영상과 8px 띄운다 */
 .sim-controls {
   margin-top: 8px;

@@ -214,7 +214,7 @@ export default function App() {
         <RobotPanel control={serverState?.control} connected={connected} keys={heightKeys} />
       </div>
       </div>
-      <details className="diagnostics" open>
+      <details className="diagnostics">
         <summary>진단(손 특징·연결 통계)</summary>
         <div className="layout">
           <FeaturePanel hand={hand} status={status} />

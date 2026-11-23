@@ -15,25 +15,27 @@ export default function ControlHandPanel({ selection, cameraOn, control, connect
       ? `조종 중인 손: ${chosen.label} (노란 선, 신뢰도 ${chosen.score.toFixed(2)})`
       : `조종 손 안 보임 (찾는 라벨: ${CONTROL_HANDEDNESS})`
   }
+  const handednessText = `조종 손은 MediaPipe 라벨 '${CONTROL_HANDEDNESS}'인 손입니다(src/hand/config.js CONTROL_HANDEDNESS). 영상을 좌우 뒤집지 않은 원본으로 넣어서 라벨이 실제 손과 반대일 수 있습니다. 손을 하나씩 들어 노란 선이 어느 손인지 확인하고, 반대면 설정값을 바꾸세요.`
   return (
     <div className="panel control-hand">
       <p className={chosen ? 'control-hand-on' : 'control-hand-off'}>{headline}</p>
       <p className="control-state">{handStatusText(control, connected)}</p>
       {cameraOn && edge && <p className="edge-message">{edgeMessage(mode)}</p>}
-      <p className="status">
-        보이는 손: {hands.length === 0 ? '없음' : hands.map((h) => `${h.label ?? '?'} ${h.score.toFixed(2)}${h.controlling ? ' ← 조종' : ''}`).join(' · ')}
-      </p>
-      {mode === 'relative' && (
-        <p className="note">
-          상대 모드: 하늘색 십자 = 기준점(손을 처음 잡은 자리), 주황 점 = 지금 손목, 점선 = 움직인 양. 손이 화면 가장자리에 가까우면
-          손을 빼서 중앙에서 다시 넣으면 그 자리가 새 기준점이 됩니다.
+      {/* 카메라가 켜졌는데 조종 손이 안 보일 때만 라벨 안내를 바로 보여 준다(같은 문장은 "자세히"에도 항상 있다). */}
+      {cameraOn && !chosen && <p className="note handedness-note">{handednessText}</p>}
+      <details className="more">
+        <summary>자세히</summary>
+        <p className="status">
+          보이는 손: {hands.length === 0 ? '없음' : hands.map((h) => `${h.label ?? '?'} ${h.score.toFixed(2)}${h.controlling ? ' ← 조종' : ''}`).join(' · ')}
         </p>
-      )}
-      <p className="note">
-        조종 손은 MediaPipe 라벨 '{CONTROL_HANDEDNESS}'인 손입니다(src/hand/config.js CONTROL_HANDEDNESS). 영상을 좌우 뒤집지
-        않은 원본으로 넣어서 라벨이 실제 손과 반대일 수 있습니다. 손을 하나씩 들어 노란 선이 어느 손인지 확인하고, 반대면
-        설정값을 바꾸세요.
-      </p>
+        {mode === 'relative' && (
+          <p className="note">
+            상대 모드: 하늘색 십자 = 기준점(손을 처음 잡은 자리), 주황 점 = 지금 손목, 점선 = 움직인 양. 손이 화면 가장자리에 가까우면
+            손을 빼서 중앙에서 다시 넣으면 그 자리가 새 기준점이 됩니다.
+          </p>
+        )}
+        <p className="note">{handednessText}</p>
+      </details>
     </div>
   )
 }
