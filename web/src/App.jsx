@@ -7,6 +7,9 @@ import HandView from './components/HandView.jsx'
 import RecordPanel from './components/RecordPanel.jsx'
 import RobotPanel from './components/RobotPanel.jsx'
 import SimView from './components/SimView.jsx'
+import StepBar from './components/StepBar.jsx'
+import TrainStep from './components/TrainStep.jsx'
+import { busyReason } from './steps/steps.js'
 import { auxMode as pickAuxMode, planAuxSend } from './aux/view.js'
 import { handEdgeStatus } from './hand/edge.js'
 import { useHeightKeys } from './input/useHeightKeys.js'
@@ -16,6 +19,7 @@ import { SimConnection, wsUrl } from './net/connection.js'
 import { applyDrag, applyWheel, pickDisplayedView, presetView, viewsEqual } from './view/camera.js'
 
 export default function App() {
+  const [step, setStep] = useState('record') // 마법사 단계: record | train | test (화면 전환만, 서버·손 추적은 그대로 돈다)
   const [cameraOn, setCameraOn] = useState(false)
   const [hand, setHand] = useState(null)
   const [selection, setSelection] = useState(null) // 보이는 손들과 조종 손 (HandView → selectHand)
@@ -152,7 +156,13 @@ export default function App() {
   return (
     <main>
       <h1>손으로 시뮬레이션 로봇 조종</h1>
-      <button onClick={toggleCamera}>{cameraOn ? '카메라 끄기' : '카메라 켜기'}</button>
+      <StepBar step={step} onStep={setStep} busyText={busyReason(serverState?.record, serverState?.auto)} />
+      {/* 단계 화면은 숨기기만 한다(언마운트하면 카메라와 서버 연결 상태가 끊긴다). 카메라·시뮬레이션 화면은 1·3단계에서 같이 쓴다. */}
+      <div hidden={step !== 'train'}>
+        <TrainStep />
+      </div>
+      <div hidden={step === 'train'}>
+      <button className="primary" onClick={toggleCamera}>{cameraOn ? '카메라 끄기' : '카메라 켜기'}</button>
       <div className="layout">
         {cameraOn ? (
           <HandView onHand={onHand} onStatus={onStatus} edge={edge} reference={referenceHand} mode={mappingMode} />
@@ -176,8 +186,10 @@ export default function App() {
           onPreset={onViewPreset}
         />
       </div>
-      <div className="layout">
+      <div className="layout" hidden={step !== 'record'}>
         <RecordPanel record={serverState?.record} connected={connected} onCommand={onRecordCommand} />
+      </div>
+      <div className="layout" hidden={step !== 'test'}>
         <AutoPanel
           auto={serverState?.auto}
           record={serverState?.record}
@@ -197,10 +209,14 @@ export default function App() {
         />
         <RobotPanel control={serverState?.control} connected={connected} keys={heightKeys} />
       </div>
-      <div className="layout">
-        <FeaturePanel hand={hand} status={status} />
-        <ConnectionPanel stats={netStats} />
       </div>
+      <details className="diagnostics" open>
+        <summary>진단(손 특징·연결 통계)</summary>
+        <div className="layout">
+          <FeaturePanel hand={hand} status={status} />
+          <ConnectionPanel stats={netStats} />
+        </div>
+      </details>
     </main>
   )
 }
