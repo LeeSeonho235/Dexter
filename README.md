@@ -8,9 +8,7 @@
 
 ### 시연 영상
 
-[![Dexter 시연: 웹캠 손 인식으로 MuJoCo SO-101 로봇팔 조종](docs/media/dexter_demo.gif)](docs/media/dexter_demo.mp4)
-
-*이미지를 누르면 원본 영상(mp4, 15초)이 열린다.*
+https://github.com/user-attachments/assets/d4b08faf-a42d-4572-90bb-a4b5d8c553f1
 
 **질문: 로봇이 틀린 곳만 고쳐주면, 더 빨리 배울까?**
 
